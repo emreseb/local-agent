@@ -1,28 +1,29 @@
-//! M0 entry point: a one-shot CLI. Parse a prompt, pick a provider, send it,
-//! print the reply. No agent loop, no tools, no async yet. Everything depends
-//! on the `LlmProvider` trait, so adding Ollama alongside Anthropic touched
-//! only this wiring — `provider.rs` did not change at all.
+//! Entry point: parse args, pick a provider, register tools, run the agent
+//! loop. The loop (in `agent.rs`) handles both plain chat and tool calls, so
+//! there's a single path here regardless of whether the model uses a tool.
 
+mod agent;
 mod anthropic;
 mod ollama;
 mod provider;
+mod tools;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 
 use crate::anthropic::AnthropicProvider;
 use crate::ollama::OllamaProvider;
-use crate::provider::{CompletionRequest, LlmProvider, Message};
+use crate::provider::LlmProvider;
+use crate::tools::{ReadFile, Tool};
 
-/// Which backend to talk to. `ValueEnum` lets clap accept `--provider ollama`
-/// or `--provider anthropic` and reject anything else.
+/// Which backend to talk to.
 #[derive(Clone, Copy, ValueEnum)]
 enum Provider {
     Anthropic,
     Ollama,
 }
 
-/// A local AI agent — M0: send a single prompt and print the response.
+/// A local AI agent — sends a prompt and runs tools the model asks for.
 #[derive(Parser)]
 #[command(name = "local-agent", version, about)]
 struct Cli {
@@ -46,17 +47,11 @@ fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
 
-    // Pick a default model based on the provider when the user didn't name one.
     let model = cli.model.unwrap_or_else(|| match cli.provider {
         Provider::Anthropic => "claude-haiku-5-5".to_string(),
         Provider::Ollama => "llama3.1:latest".to_string(),
     });
 
-    // Build the chosen provider. The type is `Box<dyn LlmProvider>`: a trait
-    // object. Both arms produce *different* concrete types, but boxing them
-    // behind the trait lets them share one variable. Calls on it are
-    // dynamically dispatched (decided at runtime). The API key is only read
-    // when Anthropic is actually selected, so Ollama needs no key.
     let provider: Box<dyn LlmProvider> = match cli.provider {
         Provider::Anthropic => {
             let api_key = std::env::var("ANTHROPIC_API_KEY")
@@ -70,17 +65,12 @@ fn main() -> Result<()> {
         }
     };
 
-    let request = CompletionRequest {
-        model,
-        max_tokens: cli.max_tokens,
-        messages: vec![Message {
-            role: "user".to_string(),
-            content: cli.prompt,
-        }],
-    };
+    // Register the tools the agent may use. To add a tool: write an `impl Tool`
+    // in tools.rs, then add one `Box::new(...)` here.
+    let tools: Vec<Box<dyn Tool>> = vec![Box::new(ReadFile)];
 
-    let response = provider.complete(&request)?;
-    println!("{}", response.text);
+    // `provider.as_ref()` turns the Box<dyn LlmProvider> into a &dyn LlmProvider.
+    agent::run(provider.as_ref(), &model, cli.max_tokens, &tools, &cli.prompt)?;
 
     Ok(())
 }

@@ -1,17 +1,19 @@
-//! One concrete `LlmProvider` that talks to Anthropic's Messages API over
-//! HTTP (blocking, no async yet). The "wire" structs below mirror the exact
-//! JSON the API expects and returns — kept private to this module so the rest
-//! of the program never sees API-specific shapes.
+//! Anthropic provider. NOTE: tool-calling is deferred here on purpose.
+//! Anthropic represents tools differently from Ollama (it uses `tool_use` and
+//! `tool_result` *content blocks* and a `stop_reason: "tool_use"`), so wiring
+//! it up is its own step. For now this provider sends only the text of each
+//! turn, ignores `request.tools`, and always returns an empty `tool_calls` —
+//! so `--provider anthropic` still works for plain chat. This is exactly the
+//! seam the `LlmProvider` trait exists to hide.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::provider::{CompletionRequest, CompletionResponse, LlmProvider, Message};
+use crate::provider::{CompletionRequest, CompletionResponse, LlmProvider};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
 
-/// Holds what the provider needs to make calls: the key and a reusable client.
 pub struct AnthropicProvider {
     api_key: String,
     client: reqwest::blocking::Client,
@@ -26,23 +28,24 @@ impl AnthropicProvider {
     }
 }
 
-/// The JSON body we send. `<'a>` is a lifetime: this struct borrows its data
-/// (it doesn't own copies), so it can't outlive the request it was built from.
 #[derive(Serialize)]
 struct WireRequest<'a> {
     model: &'a str,
     max_tokens: u32,
-    messages: &'a [Message],
+    messages: Vec<WireMessage>,
 }
 
-/// The JSON body we receive. We only pull out the `content` array.
+#[derive(Serialize)]
+struct WireMessage {
+    role: String,
+    content: String,
+}
+
 #[derive(Deserialize)]
 struct WireResponse {
     content: Vec<ContentBlock>,
 }
 
-/// Each block is tagged with a `type`. `type` is a Rust keyword, so we map the
-/// JSON field "type" onto a field named `kind` with `#[serde(rename = ...)]`.
 #[derive(Deserialize)]
 struct ContentBlock {
     #[serde(rename = "type")]
@@ -53,14 +56,22 @@ struct ContentBlock {
 
 impl LlmProvider for AnthropicProvider {
     fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse> {
+        // Text-only translation for now: map each turn to {role, content}.
+        let messages: Vec<WireMessage> = request
+            .messages
+            .iter()
+            .map(|m| WireMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            })
+            .collect();
+
         let body = WireRequest {
             model: &request.model,
             max_tokens: request.max_tokens,
-            messages: &request.messages,
+            messages,
         };
 
-        // `?` means: if this returns an error, stop and return it from the
-        // function. `.context(...)` attaches a human-friendly explanation.
         let resp = self
             .client
             .post(API_URL)
@@ -70,8 +81,6 @@ impl LlmProvider for AnthropicProvider {
             .send()
             .context("failed to reach the Anthropic API")?;
 
-        // A 4xx/5xx is still a "successful" HTTP round-trip as far as reqwest
-        // is concerned, so we check the status ourselves and surface the body.
         let status = resp.status();
         if !status.is_success() {
             let detail = resp.text().unwrap_or_default();
@@ -82,8 +91,6 @@ impl LlmProvider for AnthropicProvider {
             .json()
             .context("failed to parse the Anthropic response as JSON")?;
 
-        // Join every text block into one string. `into_iter` consumes the
-        // vector so we can move each `text` out without cloning.
         let text = parsed
             .content
             .into_iter()
@@ -92,6 +99,9 @@ impl LlmProvider for AnthropicProvider {
             .collect::<Vec<_>>()
             .join("");
 
-        Ok(CompletionResponse { text })
+        Ok(CompletionResponse {
+            text,
+            tool_calls: Vec::new(),
+        })
     }
 }
