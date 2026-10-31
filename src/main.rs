@@ -4,6 +4,7 @@
 
 mod agent;
 mod anthropic;
+mod judge;
 mod ollama;
 mod provider;
 mod tools;
@@ -12,9 +13,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 
 use crate::anthropic::AnthropicProvider;
+use crate::judge::RuleJudge;
 use crate::ollama::OllamaProvider;
 use crate::provider::LlmProvider;
-use crate::tools::{ReadFile, Tool};
+use crate::tools::{ReadFile, RunShellCommand, ToolRegistry, WriteFile};
 
 /// Which backend to talk to.
 #[derive(Clone, Copy, ValueEnum)]
@@ -41,6 +43,10 @@ struct Cli {
     /// Maximum number of tokens in the reply (used by Anthropic).
     #[arg(long, default_value_t = 1024)]
     max_tokens: u32,
+
+    /// Sampling temperature: lower = more deterministic and literal (0.0–1.0).
+    #[arg(long, default_value_t = 0.2)]
+    temperature: f32,
 }
 
 fn main() -> Result<()> {
@@ -49,7 +55,7 @@ fn main() -> Result<()> {
 
     let model = cli.model.unwrap_or_else(|| match cli.provider {
         Provider::Anthropic => "claude-haiku-5-5".to_string(),
-        Provider::Ollama => "llama3.1:latest".to_string(),
+        Provider::Ollama => "qwen2.5:7b".to_string(),
     });
 
     let provider: Box<dyn LlmProvider> = match cli.provider {
@@ -66,11 +72,17 @@ fn main() -> Result<()> {
     };
 
     // Register the tools the agent may use. To add a tool: write an `impl Tool`
-    // in tools.rs, then add one `Box::new(...)` here.
-    let tools: Vec<Box<dyn Tool>> = vec![Box::new(ReadFile)];
+    // in tools.rs, then add one `register(...)` line here.
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(ReadFile));
+    registry.register(Box::new(WriteFile));
+    registry.register(Box::new(RunShellCommand));
+
+    // The Judge gates tool calls: allow reads, confirm writes/shell, deny destructive.
+    let judge = RuleJudge;
 
     // `provider.as_ref()` turns the Box<dyn LlmProvider> into a &dyn LlmProvider.
-    agent::run(provider.as_ref(), &model, cli.max_tokens, &tools, &cli.prompt)?;
+    agent::run(provider.as_ref(), &model, cli.max_tokens, cli.temperature, &registry, &judge, &cli.prompt)?;
 
     Ok(())
 }

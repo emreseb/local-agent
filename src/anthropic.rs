@@ -32,6 +32,9 @@ impl AnthropicProvider {
 struct WireRequest<'a> {
     model: &'a str,
     max_tokens: u32,
+    temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
     messages: Vec<WireMessage>,
 }
 
@@ -69,6 +72,8 @@ impl LlmProvider for AnthropicProvider {
         let body = WireRequest {
             model: &request.model,
             max_tokens: request.max_tokens,
+            temperature: request.temperature,
+            system: request.system.clone(),
             messages,
         };
 

@@ -60,6 +60,12 @@ impl Message {
 pub struct CompletionRequest {
     pub model: String,
     pub max_tokens: u32,
+    /// Sampling temperature. Lower (near 0) = more deterministic and literal;
+    /// higher = more random/creative.
+    pub temperature: f32,
+    /// Optional system prompt. Providers place it where their API expects it
+    /// (Ollama: a system-role message; Anthropic: a top-level `system` field).
+    pub system: Option<String>,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
 }

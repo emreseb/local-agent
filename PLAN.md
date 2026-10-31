@@ -91,11 +91,11 @@ Develop entirely against `RuleJudge` for free; swap in the others only to compar
 - Concepts: structs, enums, `match`, `Option`/`Result`, `?`, basic ownership
 
 ### M1 — The agent loop + first tool + the Judge
-- [ ] `Tool` trait + `run_shell_command` only
-- [ ] Full round-trip: model requests a tool → execute → feed result back → loop
-- [ ] `Judge` trait + `RuleJudge` stub wired into the loop (the permission layer)
-- [ ] Tool registry (`Box<dyn Tool>`)
-- [ ] **Goal:** the model completes a multi-step task using the shell, gated by the Judge
+- [x] `Tool` trait + `run_shell_command` (also read_file, write_file)
+- [x] Full round-trip: model requests a tool → execute → feed result back → loop
+- [x] `Judge` trait + `RuleJudge` wired into the loop — allow reads, confirm writes/shell, deny destructive
+- [x] Tool registry (`Box<dyn Tool>`), interactive confirm prompt
+- [x] **Goal:** the model completes a task using the shell, gated by the Judge ✅ (allow/confirm/deny all verified)
 - Concepts: traits, trait objects, dynamic dispatch, the borrow checker on history
 
 ### Async milestone — convert to tokio

@@ -30,10 +30,18 @@ struct WireRequest {
     model: String,
     messages: Vec<WireMessage>,
     stream: bool,
+    options: WireOptions,
     // `skip_serializing_if` omits the field entirely when empty, keeping plain
     // chat requests clean (no empty "tools": []).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<WireTool>,
+}
+
+/// Ollama runtime options go in their own object. Temperature is the one we
+/// care about now; many more (top_p, num_predict, seed, ...) live here too.
+#[derive(Serialize)]
+struct WireOptions {
+    temperature: f32,
 }
 
 #[derive(Serialize)]
@@ -111,10 +119,25 @@ fn to_wire_message(m: &Message) -> WireMessage {
 
 impl LlmProvider for OllamaProvider {
     fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse> {
+        // Ollama takes the system prompt as the first system-role message.
+        let mut messages: Vec<WireMessage> = Vec::new();
+        if let Some(system) = &request.system {
+            messages.push(WireMessage {
+                role: "system".to_string(),
+                content: system.clone(),
+                tool_calls: Vec::new(),
+                tool_name: None,
+            });
+        }
+        messages.extend(request.messages.iter().map(to_wire_message));
+
         let body = WireRequest {
             model: request.model.clone(),
-            messages: request.messages.iter().map(to_wire_message).collect(),
+            messages,
             stream: false,
+            options: WireOptions {
+                temperature: request.temperature,
+            },
             tools: request
                 .tools
                 .iter()
