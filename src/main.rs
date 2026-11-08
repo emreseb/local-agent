@@ -7,6 +7,8 @@ mod judge;
 mod ollama;
 mod provider;
 mod tools;
+mod tui;
+mod ui;
 
 use std::io::{self, BufRead, Write};
 
@@ -21,6 +23,8 @@ use crate::provider::LlmProvider;
 use crate::tools::{
     Browse, EditFile, ListDirectory, ReadFile, RunShellCommand, ToolRegistry, WriteFile,
 };
+use crate::tui::{Action, TuiUi};
+use crate::ui::CliUi;
 
 /// Which backend to talk to.
 #[derive(Clone, Copy, ValueEnum)]
@@ -52,6 +56,10 @@ struct Cli {
     /// Sampling temperature: lower = more deterministic and literal (0.0–1.0).
     #[arg(long, default_value_t = 0.2)]
     temperature: f32,
+
+    /// Launch the full-screen TUI instead of the plain CLI/REPL.
+    #[arg(long)]
+    tui: bool,
 }
 
 #[tokio::main]
@@ -86,25 +94,55 @@ async fn main() -> Result<()> {
     registry.register(Box::new(EditFile));
     registry.register(Box::new(Browse));
 
+    // The Judge needs the workspace root to tell in-project actions from ones
+    // that reach outside it.
+    let workspace = std::env::current_dir().context("could not determine the current directory")?;
+
     let mut agent = Agent::new(
         provider,
         model,
         cli.max_tokens,
         cli.temperature,
         registry,
-        Box::new(RuleJudge),
+        Box::new(RuleJudge::new(workspace)),
     );
 
-    match cli.prompt {
-        // A prompt on the command line -> one-shot, print stats, exit.
-        Some(prompt) => {
-            let stats = agent.send(&prompt).await?;
-            eprintln!("\x1b[2m{}\x1b[0m", format_stats(&stats));
+    if cli.tui {
+        run_tui(agent).await?;
+    } else {
+        match cli.prompt {
+            // A prompt on the command line -> one-shot, print stats, exit.
+            Some(prompt) => {
+                let mut ui = CliUi;
+                let stats = agent.send(&prompt, &mut ui).await?;
+                eprintln!("\x1b[2m{}\x1b[0m", format_stats(&stats));
+            }
+            // No prompt -> interactive chat.
+            None => repl(agent).await?,
         }
-        // No prompt -> interactive chat.
-        None => repl(agent).await?,
     }
 
+    Ok(())
+}
+
+/// The full-screen TUI loop: read a prompt, run the agent (which draws its
+/// progress through `TuiUi`), show stats, repeat. The terminal is restored when
+/// `TuiUi` drops.
+async fn run_tui(mut agent: Agent) -> Result<()> {
+    let mut tui = TuiUi::new()?;
+    loop {
+        match tui.read_prompt()? {
+            Action::Quit => break,
+            Action::Clear => {
+                agent.clear();
+                tui.clear_log();
+            }
+            Action::Prompt(prompt) => match agent.send(&prompt, &mut tui).await {
+                Ok(stats) => tui.set_status(format_stats(&stats)),
+                Err(e) => tui.push_error(format!("error: {e:#}")),
+            },
+        }
+    }
     Ok(())
 }
 
@@ -114,6 +152,7 @@ async fn repl(mut agent: Agent) -> Result<()> {
     println!("local-agent REPL — type a prompt and press Enter.");
     println!("commands: 'clear' (forget context), 'exit' (quit).\n");
 
+    let mut ui = CliUi;
     let stdin = io::stdin();
     loop {
         print!("\x1b[1m» \x1b[0m");
@@ -138,7 +177,7 @@ async fn repl(mut agent: Agent) -> Result<()> {
             _ => {}
         }
 
-        match agent.send(input).await {
+        match agent.send(input, &mut ui).await {
             Ok(stats) => eprintln!("\x1b[2m{}\x1b[0m", format_stats(&stats)),
             Err(e) => eprintln!("\x1b[31merror: {e:#}\x1b[0m"),
         }

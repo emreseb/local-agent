@@ -1,11 +1,15 @@
 //! The Judge: the permission layer. Before the agent runs a tool the model
-//! asked for, it consults a Judge, which returns a verdict. This is where
-//! "the model can only call registered tools" (the registry's job) becomes
-//! "...and dangerous ones need a human's OK".
+//! asked for, it consults a Judge, which returns a verdict.
 //!
-//! `RuleJudge` is a hand-written policy — no model, no cost, instant. Later it
-//! could be swapped for a tiny local model or Jev behind this same trait (see
-//! PLAN.md); the loop wouldn't change, exactly like the provider swap.
+//! `RuleJudge` is a *graduated, workspace-aware* policy — it asks only where
+//! risk is real:
+//!   - reads  -> always allow
+//!   - writes -> allow inside the workspace, confirm outside it
+//!   - shell  -> allow a single read-only command, deny the destructive, confirm the rest
+//!   - browse -> allow read-only/navigation, confirm interactions
+//! Later it could be swapped for a model-based judge behind this same trait.
+
+use std::path::{Component, Path, PathBuf};
 
 use crate::provider::ToolCall;
 
@@ -23,35 +27,42 @@ pub trait Judge {
     fn verdict(&self, call: &ToolCall) -> Verdict;
 }
 
-/// A fixed rule set: allow reads, confirm writes and shell, deny the obviously
-/// destructive.
-pub struct RuleJudge;
+/// The graduated policy. Holds the workspace root so it can tell in-project
+/// actions from ones that reach outside it.
+pub struct RuleJudge {
+    workspace: PathBuf,
+}
+
+impl RuleJudge {
+    pub fn new(workspace: PathBuf) -> Self {
+        Self { workspace }
+    }
+
+    /// Is `path` (resolved against the workspace) inside the workspace? Resolved
+    /// lexically, so `..` is honored and escaping paths are caught — and it
+    /// works for files that don't exist yet (a new write target).
+    fn is_within_workspace(&self, path: &str) -> bool {
+        normalize(&self.workspace, Path::new(path)).starts_with(&self.workspace)
+    }
+}
 
 impl Judge for RuleJudge {
     fn verdict(&self, call: &ToolCall) -> Verdict {
         match call.name.as_str() {
-            // Reading can't damage anything.
+            // Reads can't damage anything.
             "read_file" | "list_directory" => Verdict::Allow,
 
-            // Writing changes the disk — ask first.
-            "write_file" | "edit_file" => Verdict::Confirm,
-
-            // Shell is all-powerful: block the obviously destructive, ask for the rest.
-            "run_shell_command" => {
-                let command = call
-                    .arguments
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if is_destructive(command) {
-                    Verdict::Deny(format!("refusing to run a destructive command: {command}"))
-                } else {
-                    Verdict::Confirm
+            // Writes: safe inside the project (git can undo), ask outside it.
+            "write_file" | "edit_file" => {
+                match call.arguments.get("path").and_then(|v| v.as_str()) {
+                    Some(path) if self.is_within_workspace(path) => Verdict::Allow,
+                    _ => Verdict::Confirm,
                 }
             }
 
-            // Browsing the web is a powerful external action — ask first.
-            "browse" => Verdict::Confirm,
+            // Shell and browse look at the actual command, not just the tool name.
+            "run_shell_command" => classify_shell(arg_str(call, "command")),
+            "browse" => classify_browse(arg_str(call, "command")),
 
             // Registered but unclassified: ask, to be safe.
             _ => Verdict::Confirm,
@@ -59,9 +70,65 @@ impl Judge for RuleJudge {
     }
 }
 
+/// Pull a string argument out of a tool call, or "" if missing.
+fn arg_str<'a>(call: &'a ToolCall, key: &str) -> &'a str {
+    call.arguments.get(key).and_then(|v| v.as_str()).unwrap_or("")
+}
+
+/// Programs that only read and can't modify anything.
+const READ_ONLY_PROGRAMS: &[&str] = &[
+    "ls", "cat", "pwd", "echo", "grep", "rg", "find", "head", "tail", "wc", "which", "tree",
+    "file", "stat", "date", "whoami", "env", "du", "df", "ps",
+];
+
+/// git subcommands that only read.
+const READ_ONLY_GIT: &[&str] = &["status", "diff", "log", "show", "branch", "remote"];
+
+/// agent-browser subcommands that only read/navigate, not interact.
+const READ_ONLY_BROWSE: &[&str] = &[
+    "open", "snapshot", "get", "screenshot", "pdf", "close", "list", "tabs", "wait",
+];
+
+fn classify_shell(command: &str) -> Verdict {
+    if is_destructive(command) {
+        return Verdict::Deny(format!("refusing to run a destructive command: {command}"));
+    }
+
+    // Compound commands (pipes, chaining, redirection, substitution) could hide
+    // anything, so we never auto-allow them — we can't reason about the whole
+    // thing by the first word alone.
+    if command.contains(|ch| matches!(ch, ';' | '|' | '&' | '>' | '<' | '`')) || command.contains("$(")
+    {
+        return Verdict::Confirm;
+    }
+
+    let mut words = command.split_whitespace();
+    let program = words.next().unwrap_or("");
+
+    let read_only = if program == "git" {
+        READ_ONLY_GIT.contains(&words.next().unwrap_or(""))
+    } else {
+        READ_ONLY_PROGRAMS.contains(&program)
+    };
+
+    if read_only {
+        Verdict::Allow
+    } else {
+        Verdict::Confirm
+    }
+}
+
+fn classify_browse(command: &str) -> Verdict {
+    let sub = command.split_whitespace().next().unwrap_or("");
+    if READ_ONLY_BROWSE.contains(&sub) {
+        Verdict::Allow
+    } else {
+        Verdict::Confirm
+    }
+}
+
 /// A conservative blocklist for the worst offenders. A blocklist NEVER catches
-/// everything — which is the whole point of `Confirm`: the human in the loop is
-/// the real safety net, not this function.
+/// everything — that's why Confirm (a human) is the real safety net.
 fn is_destructive(command: &str) -> bool {
     let c = command.to_lowercase();
     c.contains("rm -rf")
@@ -69,4 +136,27 @@ fn is_destructive(command: &str) -> bool {
         || c.contains("dd if=")
         || c.contains(":(){") // fork bomb
         || c.contains("> /dev/sd")
+}
+
+/// Resolve `path` against `base` and collapse `.`/`..` lexically (no filesystem
+/// access, so it works for paths that don't exist yet).
+fn normalize(base: &Path, path: &Path) -> PathBuf {
+    let mut result = if path.is_relative() {
+        base.to_path_buf()
+    } else {
+        PathBuf::new()
+    };
+
+    for component in path.components() {
+        match component {
+            Component::RootDir => result.push("/"),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                result.pop();
+            }
+            Component::Normal(c) => result.push(c),
+            Component::Prefix(_) => {} // Windows-only; irrelevant here
+        }
+    }
+    result
 }

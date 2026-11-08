@@ -1,35 +1,29 @@
 //! The agent: owns the provider, tools, judge, config, and the running
-//! conversation. `send` runs one user turn (the tool loop) and returns timing
-//! and token stats. Keeping the message history in the struct is what lets the
-//! REPL be a real, context-remembering chat.
+//! conversation. `send` runs one user turn (the tool loop) and reports progress
+//! through a `Ui` (which prints, or draws the TUI) instead of printing itself.
 
-use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
 use crate::judge::{Judge, Verdict};
-use crate::provider::{CompletionRequest, LlmProvider, Message, ToolCall};
+use crate::provider::{CompletionRequest, LlmProvider, Message};
 use crate::tools::ToolRegistry;
+use crate::ui::{Event, Ui};
 
 /// Safety valve: never loop forever if a model keeps calling tools.
 const MAX_STEPS: usize = 10;
 
 /// Metrics for one `send` — one user turn, which may span several model calls.
 pub struct TurnStats {
-    /// Wall-clock time for the whole turn (model + tools + our overhead).
     pub elapsed: Duration,
-    /// Tokens the model generated across the turn.
     pub output_tokens: u32,
-    /// Nanoseconds the model spent generating (sum across calls).
     pub eval_duration_ns: u64,
-    /// How many times we called the model this turn.
     pub model_calls: usize,
 }
 
 impl TurnStats {
-    /// Generation speed from the model's own eval time, not wall clock (so it
-    /// isn't skewed by network, tool runs, or waiting on your confirmations).
+    /// Generation speed from the model's own eval time, not wall clock.
     pub fn tokens_per_second(&self) -> f64 {
         if self.eval_duration_ns == 0 {
             0.0
@@ -78,12 +72,13 @@ impl Agent {
     }
 
     /// Run one user turn: send the conversation, run any tools the model asks
-    /// for (gated by the Judge), loop until it answers in plain text. Prints the
-    /// answer and returns timing/token stats for the whole turn.
-    pub async fn send(&mut self, user_input: &str) -> Result<TurnStats> {
+    /// for (gated by the Judge), loop until it answers in plain text. Progress
+    /// goes to `ui`; returns timing/token stats for the whole turn.
+    pub async fn send(&mut self, user_input: &str, ui: &mut dyn Ui) -> Result<TurnStats> {
         let start = Instant::now();
         let specs = self.registry.specs();
 
+        ui.emit(Event::User(user_input.to_string()));
         self.messages.push(Message::user(user_input));
 
         let mut output_tokens = 0u32;
@@ -109,7 +104,7 @@ impl Agent {
 
             // No tool calls -> the model is done. Record it and return stats.
             if response.tool_calls.is_empty() {
-                println!("{}", response.text);
+                ui.emit(Event::Assistant(response.text.clone()));
                 self.messages
                     .push(Message::assistant(response.text, Vec::new()));
                 return Ok(TurnStats {
@@ -128,16 +123,20 @@ impl Agent {
 
             // ...ask the Judge about each call, act, and feed the result back.
             for call in &response.tool_calls {
-                println!("\x1b[2m↳ {}({})\x1b[0m", call.name, call.arguments);
+                let args = call.arguments.to_string();
+                ui.emit(Event::ToolCall {
+                    name: call.name.clone(),
+                    args: args.clone(),
+                });
 
                 let result = match self.judge.verdict(call) {
                     Verdict::Allow => self.registry.dispatch(&call.name, &call.arguments).await,
                     Verdict::Deny(reason) => {
-                        println!("\x1b[31m  ✗ denied: {reason}\x1b[0m");
+                        ui.emit(Event::ToolDenied(reason.clone()));
                         format!("denied: {reason}")
                     }
                     Verdict::Confirm => {
-                        if confirm(call)? {
+                        if ui.confirm(&call.name, &args)? {
                             self.registry.dispatch(&call.name, &call.arguments).await
                         } else {
                             "denied: the user declined this action".to_string()
@@ -145,9 +144,7 @@ impl Agent {
                     }
                 };
 
-                let preview: String = result.chars().take(200).collect();
-                println!("\x1b[2m  → {}\x1b[0m", preview.replace('\n', " "));
-
+                ui.emit(Event::ToolResult(result.clone()));
                 self.messages
                     .push(Message::tool_result(call.name.clone(), result));
             }
@@ -155,19 +152,6 @@ impl Agent {
 
         anyhow::bail!("gave up after {MAX_STEPS} tool-calling steps");
     }
-}
-
-/// Ask the human to approve a tool call. Returns true only for an explicit yes.
-fn confirm(call: &ToolCall) -> Result<bool> {
-    print!(
-        "\x1b[33m⚠ allow {}({})? [y/N] \x1b[0m",
-        call.name, call.arguments
-    );
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(matches!(input.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
 /// Build the system prompt from the live registry, so the tool list the model
