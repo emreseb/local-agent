@@ -1,6 +1,5 @@
-//! Entry point: parse args, pick a provider, register tools, run the agent
-//! loop. The loop (in `agent.rs`) handles both plain chat and tool calls, so
-//! there's a single path here regardless of whether the model uses a tool.
+//! Entry point: parse args, build the agent, then run one prompt or an
+//! interactive REPL. Pass a prompt for one-shot mode; pass none to chat.
 
 mod agent;
 mod anthropic;
@@ -9,9 +8,12 @@ mod ollama;
 mod provider;
 mod tools;
 
+use std::io::{self, BufRead, Write};
+
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 
+use crate::agent::{Agent, TurnStats};
 use crate::anthropic::AnthropicProvider;
 use crate::judge::RuleJudge;
 use crate::ollama::OllamaProvider;
@@ -25,12 +27,13 @@ enum Provider {
     Ollama,
 }
 
-/// A local AI agent — sends a prompt and runs tools the model asks for.
+/// A local AI agent. Give it a prompt for one-shot mode, or no prompt to open
+/// an interactive REPL.
 #[derive(Parser)]
 #[command(name = "local-agent", version, about)]
 struct Cli {
-    /// The prompt to send to the model.
-    prompt: String,
+    /// The prompt to send. Omit it to start an interactive chat (REPL).
+    prompt: Option<String>,
 
     /// Which backend to use. Defaults to Ollama (local, free).
     #[arg(long, value_enum, default_value_t = Provider::Ollama)]
@@ -72,8 +75,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Register the tools the agent may use. To add a tool: write an `impl Tool`
-    // in tools.rs, then add one `register(...)` line here.
+    // Register the tools the agent may use.
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(ReadFile));
     registry.register(Box::new(WriteFile));
@@ -81,11 +83,76 @@ async fn main() -> Result<()> {
     registry.register(Box::new(ListDirectory));
     registry.register(Box::new(EditFile));
 
-    // The Judge gates tool calls: allow reads, confirm writes/shell, deny destructive.
-    let judge = RuleJudge;
+    let mut agent = Agent::new(
+        provider,
+        model,
+        cli.max_tokens,
+        cli.temperature,
+        registry,
+        Box::new(RuleJudge),
+    );
 
-    // `provider.as_ref()` turns the Box<dyn LlmProvider> into a &dyn LlmProvider.
-    agent::run(provider.as_ref(), &model, cli.max_tokens, cli.temperature, &registry, &judge, &cli.prompt).await?;
+    match cli.prompt {
+        // A prompt on the command line -> one-shot, print stats, exit.
+        Some(prompt) => {
+            let stats = agent.send(&prompt).await?;
+            eprintln!("\x1b[2m{}\x1b[0m", format_stats(&stats));
+        }
+        // No prompt -> interactive chat.
+        None => repl(agent).await?,
+    }
 
     Ok(())
+}
+
+/// Interactive read-eval-print loop. Each line is a prompt, and the
+/// conversation carries over between lines. Commands: `clear`, `exit`.
+async fn repl(mut agent: Agent) -> Result<()> {
+    println!("local-agent REPL — type a prompt and press Enter.");
+    println!("commands: 'clear' (forget context), 'exit' (quit).\n");
+
+    let stdin = io::stdin();
+    loop {
+        print!("\x1b[1m» \x1b[0m");
+        io::stdout().flush()?;
+
+        let mut line = String::new();
+        // read_line returns 0 bytes at end-of-input (Ctrl-D) — time to leave.
+        if stdin.lock().read_line(&mut line)? == 0 {
+            println!();
+            break;
+        }
+
+        let input = line.trim();
+        match input {
+            "" => continue,
+            "exit" | "quit" | ":q" => break,
+            "clear" | ":clear" => {
+                agent.clear();
+                println!("\x1b[2m(conversation cleared)\x1b[0m");
+                continue;
+            }
+            _ => {}
+        }
+
+        match agent.send(input).await {
+            Ok(stats) => eprintln!("\x1b[2m{}\x1b[0m", format_stats(&stats)),
+            Err(e) => eprintln!("\x1b[31merror: {e:#}\x1b[0m"),
+        }
+    }
+
+    println!("bye!");
+    Ok(())
+}
+
+/// One-line, dim stats summary printed after each turn.
+fn format_stats(s: &TurnStats) -> String {
+    format!(
+        "[{:.1}s · {} tok · {:.1} tok/s · {} call{}]",
+        s.elapsed.as_secs_f64(),
+        s.output_tokens,
+        s.tokens_per_second(),
+        s.model_calls,
+        if s.model_calls == 1 { "" } else { "s" },
+    )
 }

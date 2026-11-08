@@ -71,12 +71,22 @@ pub struct CompletionRequest {
     pub tools: Vec<ToolSpec>,
 }
 
+/// Token/timing metrics for one model call, when the provider reports them.
+#[derive(Debug, Clone)]
+pub struct Usage {
+    /// Tokens the model generated (Ollama's `eval_count`).
+    pub output_tokens: u32,
+    /// Nanoseconds spent generating them (Ollama's `eval_duration`).
+    pub eval_duration_ns: u64,
+}
+
 /// An assistant turn: free text, tool calls, or both. `tool_calls` is empty
 /// when the model answered in plain language.
 #[derive(Debug, Clone)]
 pub struct CompletionResponse {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
+    pub usage: Option<Usage>,
 }
 
 #[async_trait]

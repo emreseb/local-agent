@@ -107,6 +107,7 @@ impl LlmProvider for AnthropicProvider {
         Ok(CompletionResponse {
             text,
             tool_calls: Vec::new(),
+            usage: None,
         })
     }
 }

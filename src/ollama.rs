@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::provider::{CompletionRequest, CompletionResponse, LlmProvider, Message, ToolCall};
+use crate::provider::{CompletionRequest, CompletionResponse, LlmProvider, Message, ToolCall, Usage};
 
 pub struct OllamaProvider {
     base_url: String,
@@ -80,6 +80,11 @@ struct WireToolCallFn {
 #[derive(Deserialize)]
 struct WireResponse {
     message: WireResponseMessage,
+    // Ollama reports these; default to 0 if a response ever omits them.
+    #[serde(default)]
+    eval_count: u32,
+    #[serde(default)]
+    eval_duration: u64,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +183,10 @@ impl LlmProvider for OllamaProvider {
         Ok(CompletionResponse {
             text: parsed.message.content,
             tool_calls,
+            usage: Some(Usage {
+                output_tokens: parsed.eval_count,
+                eval_duration_ns: parsed.eval_duration,
+            }),
         })
     }
 }
