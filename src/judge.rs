@@ -34,7 +34,7 @@ impl Judge for RuleJudge {
             "read_file" | "list_directory" => Verdict::Allow,
 
             // Writing changes the disk — ask first.
-            "write_file" => Verdict::Confirm,
+            "write_file" | "edit_file" => Verdict::Confirm,
 
             // Shell is all-powerful: block the obviously destructive, ask for the rest.
             "run_shell_command" => {

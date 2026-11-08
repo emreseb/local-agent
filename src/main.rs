@@ -16,7 +16,7 @@ use crate::anthropic::AnthropicProvider;
 use crate::judge::RuleJudge;
 use crate::ollama::OllamaProvider;
 use crate::provider::LlmProvider;
-use crate::tools::{ReadFile, RunShellCommand, ToolRegistry, WriteFile};
+use crate::tools::{EditFile, ListDirectory, ReadFile, RunShellCommand, ToolRegistry, WriteFile};
 
 /// Which backend to talk to.
 #[derive(Clone, Copy, ValueEnum)]
@@ -78,6 +78,8 @@ async fn main() -> Result<()> {
     registry.register(Box::new(ReadFile));
     registry.register(Box::new(WriteFile));
     registry.register(Box::new(RunShellCommand));
+    registry.register(Box::new(ListDirectory));
+    registry.register(Box::new(EditFile));
 
     // The Judge gates tool calls: allow reads, confirm writes/shell, deny destructive.
     let judge = RuleJudge;

@@ -105,7 +105,7 @@ Develop entirely against `RuleJudge` for free; swap in the others only to compar
 - Concepts: `async`/`await`, `tokio` runtime, futures, `async-trait` for `dyn` traits
 
 ### M2 — Broaden the tools
-- [ ] `read_file`, `write_file`, `edit_file`, `list_dir`
+- [x] `read_file`, `write_file`, `edit_file`, `list_directory`
 - [ ] `http_fetch`
 - [ ] `git` (status/diff/commit)
 - [ ] (optional) `LocalModelJudge` via Ollama

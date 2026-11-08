@@ -237,3 +237,139 @@ impl Tool for RunShellCommand {
         Ok(result)
     }
 }
+
+/// List the entries in a directory. Read-only, so the Judge lets it run freely.
+pub struct ListDirectory;
+
+#[async_trait]
+impl Tool for ListDirectory {
+    fn name(&self) -> &str {
+        "list_directory"
+    }
+
+    fn description(&self) -> &str {
+        "List the files and subdirectories in a directory (defaults to the current directory)."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Directory to list. Defaults to '.' (the current directory)."
+                }
+            },
+            "required": []
+        })
+    }
+
+    async fn run(&self, arguments: &Value) -> Result<String> {
+        // `path` is optional here — fall back to the current directory.
+        let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+
+        let mut dir = tokio::fs::read_dir(path)
+            .await
+            .with_context(|| format!("could not read directory '{path}'"))?;
+
+        let mut names: Vec<String> = Vec::new();
+        // read_dir yields entries one at a time; `next_entry().await` gets each.
+        while let Some(entry) = dir
+            .next_entry()
+            .await
+            .with_context(|| format!("error while reading directory '{path}'"))?
+        {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+            // Trailing slash marks directories, like `ls -F`.
+            names.push(if is_dir { format!("{name}/") } else { name });
+        }
+
+        names.sort();
+        if names.is_empty() {
+            Ok(format!("(empty directory: {path})"))
+        } else {
+            Ok(names.join("\n"))
+        }
+    }
+}
+
+/// Replace one exact, unique string in a file. Safer and more precise than
+/// overwriting the whole file: it refuses if `old_string` is missing or
+/// appears more than once, and reports that back so the model can retry.
+pub struct EditFile;
+
+#[async_trait]
+impl Tool for EditFile {
+    fn name(&self) -> &str {
+        "edit_file"
+    }
+
+    fn description(&self) -> &str {
+        "Replace an exact string in a file with new text. old_string must appear exactly once."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to edit."
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "The exact text to replace. Must match exactly and appear once."
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "The text to put in its place."
+                }
+            },
+            "required": ["path", "old_string", "new_string"]
+        })
+    }
+
+    async fn run(&self, arguments: &Value) -> Result<String> {
+        let path = arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .context("edit_file requires a string argument 'path'")?;
+        let old_string = arguments
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .context("edit_file requires a string argument 'old_string'")?;
+        let new_string = arguments
+            .get("new_string")
+            .and_then(|v| v.as_str())
+            .context("edit_file requires a string argument 'new_string'")?;
+
+        if old_string.is_empty() {
+            anyhow::bail!("edit_file: old_string must not be empty");
+        }
+
+        let contents = tokio::fs::read_to_string(path)
+            .await
+            .with_context(|| format!("could not read file '{path}'"))?;
+
+        // Require a single, unambiguous match — the same discipline a good edit
+        // tool uses, so the model can't accidentally change the wrong spot.
+        let count = contents.matches(old_string).count();
+        if count == 0 {
+            anyhow::bail!("edit_file: old_string was not found in '{path}'");
+        }
+        if count > 1 {
+            anyhow::bail!(
+                "edit_file: old_string appears {count} times in '{path}'; \
+                 include more surrounding text to make it unique"
+            );
+        }
+
+        let updated = contents.replacen(old_string, new_string, 1);
+        tokio::fs::write(path, &updated)
+            .await
+            .with_context(|| format!("could not write file '{path}'"))?;
+
+        Ok(format!("Replaced 1 occurrence in '{path}'"))
+    }
+}
