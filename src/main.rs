@@ -49,7 +49,8 @@ struct Cli {
     temperature: f32,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
 
@@ -82,7 +83,7 @@ fn main() -> Result<()> {
     let judge = RuleJudge;
 
     // `provider.as_ref()` turns the Box<dyn LlmProvider> into a &dyn LlmProvider.
-    agent::run(provider.as_ref(), &model, cli.max_tokens, cli.temperature, &registry, &judge, &cli.prompt)?;
+    agent::run(provider.as_ref(), &model, cli.max_tokens, cli.temperature, &registry, &judge, &cli.prompt).await?;
 
     Ok(())
 }

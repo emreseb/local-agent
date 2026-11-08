@@ -98,11 +98,11 @@ Develop entirely against `RuleJudge` for free; swap in the others only to compar
 - [x] **Goal:** the model completes a task using the shell, gated by the Judge ✅ (allow/confirm/deny all verified)
 - Concepts: traits, trait objects, dynamic dispatch, the borrow checker on history
 
-### Async milestone — convert to tokio
-- [ ] Move `LlmProvider`/`Tool`/`Judge` to async
-- [ ] Switch to async `reqwest`
-- [ ] **Goal:** understand *why* async exists, having felt the blocking version
-- Concepts: `async`/`await`, `tokio` tasks, futures
+### Async milestone — convert to tokio ✅
+- [x] Move `LlmProvider` + `Tool` (and registry) to async via `async-trait`; `Judge` stays sync (no I/O)
+- [x] Switch to async `reqwest`; `#[tokio::main]` runtime; `tokio::fs` / `tokio::process` in tools
+- [x] **Goal:** understand *why* async exists, having felt the blocking version
+- Concepts: `async`/`await`, `tokio` runtime, futures, `async-trait` for `dyn` traits
 
 ### M2 — Broaden the tools
 - [ ] `read_file`, `write_file`, `edit_file`, `list_dir`

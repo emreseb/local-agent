@@ -1,12 +1,10 @@
-//! Anthropic provider. NOTE: tool-calling is deferred here on purpose.
-//! Anthropic represents tools differently from Ollama (it uses `tool_use` and
-//! `tool_result` *content blocks* and a `stop_reason: "tool_use"`), so wiring
-//! it up is its own step. For now this provider sends only the text of each
-//! turn, ignores `request.tools`, and always returns an empty `tool_calls` —
-//! so `--provider anthropic` still works for plain chat. This is exactly the
-//! seam the `LlmProvider` trait exists to hide.
+//! Anthropic provider (async). Tool-calling is still deferred here (see the
+//! earlier note): it sends only the text of each turn, ignores `request.tools`,
+//! and returns an empty `tool_calls`, so `--provider anthropic` works for plain
+//! chat. Now uses the async `reqwest::Client`.
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::provider::{CompletionRequest, CompletionResponse, LlmProvider};
@@ -16,14 +14,14 @@ const API_VERSION: &str = "2023-06-01";
 
 pub struct AnthropicProvider {
     api_key: String,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 impl AnthropicProvider {
     pub fn new(api_key: String) -> Self {
         Self {
             api_key,
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::Client::new(),
         }
     }
 }
@@ -57,9 +55,9 @@ struct ContentBlock {
     text: String,
 }
 
+#[async_trait]
 impl LlmProvider for AnthropicProvider {
-    fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse> {
-        // Text-only translation for now: map each turn to {role, content}.
+    async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse> {
         let messages: Vec<WireMessage> = request
             .messages
             .iter()
@@ -84,16 +82,18 @@ impl LlmProvider for AnthropicProvider {
             .header("anthropic-version", API_VERSION)
             .json(&body)
             .send()
+            .await
             .context("failed to reach the Anthropic API")?;
 
         let status = resp.status();
         if !status.is_success() {
-            let detail = resp.text().unwrap_or_default();
+            let detail = resp.text().await.unwrap_or_default();
             anyhow::bail!("Anthropic API returned {status}: {detail}");
         }
 
         let parsed: WireResponse = resp
             .json()
+            .await
             .context("failed to parse the Anthropic response as JSON")?;
 
         let text = parsed

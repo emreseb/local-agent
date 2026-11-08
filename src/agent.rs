@@ -13,7 +13,7 @@ use crate::tools::ToolRegistry;
 /// Safety valve: never loop forever if a model keeps calling tools.
 const MAX_STEPS: usize = 10;
 
-pub fn run(
+pub async fn run(
     provider: &dyn LlmProvider,
     model: &str,
     max_tokens: u32,
@@ -37,7 +37,7 @@ pub fn run(
             tools: specs.clone(),
         };
 
-        let response = provider.complete(&request)?;
+        let response = provider.complete(&request).await?;
 
         // No tool calls -> the model is done. Print the answer and stop.
         if response.tool_calls.is_empty() {
@@ -54,14 +54,14 @@ pub fn run(
             println!("\x1b[2m↳ {}({})\x1b[0m", call.name, call.arguments);
 
             let result = match judge.verdict(call) {
-                Verdict::Allow => registry.dispatch(&call.name, &call.arguments),
+                Verdict::Allow => registry.dispatch(&call.name, &call.arguments).await,
                 Verdict::Deny(reason) => {
                     println!("\x1b[31m  ✗ denied: {reason}\x1b[0m");
                     format!("denied: {reason}")
                 }
                 Verdict::Confirm => {
                     if confirm(call)? {
-                        registry.dispatch(&call.name, &call.arguments)
+                        registry.dispatch(&call.name, &call.arguments).await
                     } else {
                         "denied: the user declined this action".to_string()
                     }

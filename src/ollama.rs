@@ -1,9 +1,9 @@
-//! Ollama provider with tool-calling support. This file owns the *translation*
-//! between our neutral types (Message, ToolSpec, ToolCall) and Ollama's exact
-//! `/api/chat` JSON. Everything with a `Wire` prefix is private to this module
-//! and mirrors Ollama's shapes precisely; the rest of the program never sees them.
+//! Ollama provider with tool-calling support (async). Owns the translation
+//! between our neutral types and Ollama's `/api/chat` JSON. Now uses the async
+//! `reqwest::Client`, so the network calls `.await` instead of blocking.
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -11,14 +11,14 @@ use crate::provider::{CompletionRequest, CompletionResponse, LlmProvider, Messag
 
 pub struct OllamaProvider {
     base_url: String,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 impl OllamaProvider {
     pub fn new(base_url: String) -> Self {
         Self {
             base_url,
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::Client::new(),
         }
     }
 }
@@ -31,14 +31,10 @@ struct WireRequest {
     messages: Vec<WireMessage>,
     stream: bool,
     options: WireOptions,
-    // `skip_serializing_if` omits the field entirely when empty, keeping plain
-    // chat requests clean (no empty "tools": []).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<WireTool>,
 }
 
-/// Ollama runtime options go in their own object. Temperature is the one we
-/// care about now; many more (top_p, num_predict, seed, ...) live here too.
 #[derive(Serialize)]
 struct WireOptions {
     temperature: f32,
@@ -56,8 +52,6 @@ struct WireMessage {
 
 #[derive(Serialize)]
 struct WireTool {
-    // JSON needs a field literally called "type", which is a Rust keyword, so
-    // we store it as `kind` and rename on the wire.
     #[serde(rename = "type")]
     kind: String,
     function: WireFunction,
@@ -70,8 +64,6 @@ struct WireFunction {
     parameters: Value,
 }
 
-// Tool calls appear in BOTH directions — in the history we send and in the
-// response we receive — so this type is both Serialize and Deserialize.
 #[derive(Serialize, Deserialize)]
 struct WireToolCall {
     function: WireToolCallFn,
@@ -117,8 +109,9 @@ fn to_wire_message(m: &Message) -> WireMessage {
     }
 }
 
+#[async_trait]
 impl LlmProvider for OllamaProvider {
-    fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse> {
+    async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse> {
         // Ollama takes the system prompt as the first system-role message.
         let mut messages: Vec<WireMessage> = Vec::new();
         if let Some(system) = &request.system {
@@ -158,20 +151,20 @@ impl LlmProvider for OllamaProvider {
             .post(&url)
             .json(&body)
             .send()
+            .await
             .context("failed to reach Ollama — is `ollama serve` running?")?;
 
         let status = resp.status();
         if !status.is_success() {
-            let detail = resp.text().unwrap_or_default();
+            let detail = resp.text().await.unwrap_or_default();
             anyhow::bail!("Ollama returned {status}: {detail}");
         }
 
         let parsed: WireResponse = resp
             .json()
+            .await
             .context("failed to parse the Ollama response as JSON")?;
 
-        // Wire -> neutral: flatten Ollama's nested `function` back into our
-        // flat ToolCall.
         let tool_calls = parsed
             .message
             .tool_calls

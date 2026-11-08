@@ -1,15 +1,17 @@
-//! Tools the agent can call, and the registry that owns them.
+//! Tools the agent can call, and the registry that owns them (async).
 //!
-//! A `Tool` describes itself to the model and runs when asked. The
-//! `ToolRegistry` holds the set of tools and is the single authority on which
-//! tools exist: it builds the specs we advertise, looks tools up by name, and
-//! dispatches calls — rejecting any name it doesn't recognise.
+//! A `Tool` describes itself to the model and runs when asked. `run` is async
+//! because it does I/O — reading files, spawning processes — using tokio's
+//! async equivalents of `std::fs` / `std::process`. The `ToolRegistry` is the
+//! single authority on which tools exist and dispatches calls to them.
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::provider::ToolSpec;
 
+#[async_trait]
 pub trait Tool {
     /// The name the model uses to call this tool (must be stable and unique).
     fn name(&self) -> &str;
@@ -21,8 +23,8 @@ pub trait Tool {
     fn parameters(&self) -> Value;
 
     /// Execute with the model-supplied `arguments`, returning text to feed back
-    /// to the model. Returning `Err` is fine — the registry reports it to the model.
-    fn run(&self, arguments: &Value) -> Result<String>;
+    /// to the model. Async because it waits on I/O.
+    async fn run(&self, arguments: &Value) -> Result<String>;
 }
 
 /// Owns the agent's tools and answers "does this tool exist?" in one place.
@@ -35,12 +37,10 @@ impl ToolRegistry {
         Self { tools: Vec::new() }
     }
 
-    /// Add a tool to the registry.
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         self.tools.push(tool);
     }
 
-    /// Look up a tool by name (`None` if nothing is registered under it).
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools
             .iter()
@@ -66,13 +66,12 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// Run a tool by name. This is the single place that decides whether a tool
-    /// exists: an unknown name never executes anything — it returns an error
-    /// string (listing the real tools) that we feed back to the model so it can
-    /// correct itself. So "send_money" simply bounces here.
-    pub fn dispatch(&self, name: &str, arguments: &Value) -> String {
+    /// Run a tool by name. The single place that decides whether a tool exists:
+    /// an unknown name never executes anything — it returns an error string
+    /// (listing the real tools) that we feed back to the model.
+    pub async fn dispatch(&self, name: &str, arguments: &Value) -> String {
         match self.get(name) {
-            Some(tool) => match tool.run(arguments) {
+            Some(tool) => match tool.run(arguments).await {
                 Ok(output) => output,
                 Err(e) => format!("error: {e}"),
             },
@@ -84,16 +83,16 @@ impl ToolRegistry {
     }
 }
 
-// Idiomatic: when a type has a no-arg `new`, also provide `Default`.
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Example tool: read a UTF-8 text file and return its contents.
+/// Read a UTF-8 text file and return its contents.
 pub struct ReadFile;
 
+#[async_trait]
 impl Tool for ReadFile {
     fn name(&self) -> &str {
         "read_file"
@@ -116,21 +115,24 @@ impl Tool for ReadFile {
         })
     }
 
-    fn run(&self, arguments: &Value) -> Result<String> {
+    async fn run(&self, arguments: &Value) -> Result<String> {
         let path = arguments
             .get("path")
             .and_then(|v| v.as_str())
             .context("read_file requires a string argument 'path'")?;
 
-        let contents = std::fs::read_to_string(path)
+        let contents = tokio::fs::read_to_string(path)
+            .await
             .with_context(|| format!("could not read file '{path}'"))?;
 
         Ok(contents)
     }
 }
 
+/// Write the given contents to a UTF-8 text file.
 pub struct WriteFile;
 
+#[async_trait]
 impl Tool for WriteFile {
     fn name(&self) -> &str {
         "write_file"
@@ -157,7 +159,7 @@ impl Tool for WriteFile {
         })
     }
 
-    fn run(&self, arguments: &Value) -> Result<String> {
+    async fn run(&self, arguments: &Value) -> Result<String> {
         let path = arguments
             .get("path")
             .and_then(|v| v.as_str())
@@ -168,17 +170,19 @@ impl Tool for WriteFile {
             .and_then(|v| v.as_str())
             .context("write_file requires a string argument 'contents'")?;
 
-        std::fs::write(path, contents)
+        tokio::fs::write(path, contents)
+            .await
             .with_context(|| format!("could not write file '{path}'"))?;
 
         Ok(format!("Wrote {} bytes to '{path}'", contents.len()))
     }
 }
 
-/// Run a shell command and return its combined output. The powerful,
-/// dangerous one — which is why the Judge gates it before it ever runs here.
+/// Run a shell command and return its combined output. The powerful, dangerous
+/// one — which is why the Judge gates it before it ever runs here.
 pub struct RunShellCommand;
 
+#[async_trait]
 impl Tool for RunShellCommand {
     fn name(&self) -> &str {
         "run_shell_command"
@@ -201,17 +205,18 @@ impl Tool for RunShellCommand {
         })
     }
 
-    fn run(&self, arguments: &Value) -> Result<String> {
+    async fn run(&self, arguments: &Value) -> Result<String> {
         let command = arguments
             .get("command")
             .and_then(|v| v.as_str())
             .context("run_shell_command requires a string argument 'command'")?;
 
         // `sh -c "<command>"` runs it through the shell, so pipes and the like work.
-        let output = std::process::Command::new("sh")
+        let output = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(command)
             .output()
+            .await
             .with_context(|| format!("failed to launch command: {command}"))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);

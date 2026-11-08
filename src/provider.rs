@@ -4,6 +4,7 @@
 //! format, so the agent loop never sees an API-specific shape.
 
 use anyhow::Result;
+use async_trait::async_trait;
 use serde_json::Value;
 
 /// A tool we advertise to the model: its name, what it does, and a JSON Schema
@@ -78,6 +79,7 @@ pub struct CompletionResponse {
     pub tool_calls: Vec<ToolCall>,
 }
 
+#[async_trait]
 pub trait LlmProvider {
-    fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse>;
+    async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse>;
 }
