@@ -373,3 +373,75 @@ impl Tool for EditFile {
         Ok(format!("Replaced 1 occurrence in '{path}'"))
     }
 }
+
+/// Drive a web browser through the external `agent-browser` CLI. This is a thin
+/// wrapper: it shells out to `agent-browser <command>`. The agent-browser
+/// "cheat sheet" lives in this tool's `description` — that is where usage docs
+/// for a tool belong, not in the global system prompt. Requires the
+/// `agent-browser` binary to be installed (see https://agent-browser.dev).
+pub struct Browse;
+
+#[async_trait]
+impl Tool for Browse {
+    fn name(&self) -> &str {
+        "browse"
+    }
+
+    fn description(&self) -> &str {
+        // One flowing paragraph (the `\` line-continuations strip the newlines),
+        // acting as the model's cheat sheet for agent-browser.
+        "Control a web browser through the agent-browser CLI. Put the subcommand and its \
+         arguments in `command` (omit the leading 'agent-browser'). Common commands: \
+         'open <url>' opens a page; 'snapshot -i' reads the current page as a numbered \
+         accessibility tree with element refs like @e1 and @e2; 'click <ref>' clicks an \
+         element (e.g. 'click @e2'); 'fill <ref> <text>' types into a field; 'get url' \
+         prints the current URL; 'screenshot <path>' saves a screenshot; 'close' closes \
+         the browser. Workflow: open a page, then 'snapshot -i' to see refs, then act on a \
+         ref. Snapshot again after navigating or clicking, because old refs go stale."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The agent-browser subcommand and args, e.g. 'open example.com' or 'click @e2'."
+                }
+            },
+            "required": ["command"]
+        })
+    }
+
+    async fn run(&self, arguments: &Value) -> Result<String> {
+        let command = arguments
+            .get("command")
+            .and_then(|v| v.as_str())
+            .context("browse requires a string argument 'command'")?;
+
+        // Run through the shell so quoting in the command (e.g. fill @e1 "a b") works.
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("agent-browser {command}"))
+            .output()
+            .await
+            .context("failed to launch agent-browser — is it installed? (https://agent-browser.dev)")?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        let mut result = String::new();
+        if !stdout.is_empty() {
+            result.push_str(&stdout);
+        }
+        if !stderr.is_empty() {
+            result.push_str("\n[stderr]\n");
+            result.push_str(&stderr);
+        }
+        if result.is_empty() {
+            result = format!("(no output; exit status: {})", output.status);
+        }
+
+        Ok(result)
+    }
+}

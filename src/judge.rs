@@ -50,6 +50,9 @@ impl Judge for RuleJudge {
                 }
             }
 
+            // Browsing the web is a powerful external action — ask first.
+            "browse" => Verdict::Confirm,
+
             // Registered but unclassified: ask, to be safe.
             _ => Verdict::Confirm,
         }
