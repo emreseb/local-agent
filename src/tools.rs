@@ -11,8 +11,10 @@ use serde_json::{json, Value};
 
 use crate::provider::ToolSpec;
 
+// `Send + Sync` so the registry (and the whole agent) can move to a background
+// task — see the note on `LlmProvider`.
 #[async_trait]
-pub trait Tool {
+pub trait Tool: Send + Sync {
     /// The name the model uses to call this tool (must be stable and unique).
     fn name(&self) -> &str;
 

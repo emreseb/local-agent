@@ -53,11 +53,11 @@ The agent loop depends only on these traits — never directly on the HTTP clien
 
 Deciding allow/confirm/deny is a **classification** problem, so it doesn't need a big model.
 
-| Impl              | What                                             | Cost        | Milestone |
-|-------------------|--------------------------------------------------|-------------|-----------|
+| Impl                | What                                                 | Cost          | Milestone |
+| ------------------- | ---------------------------------------------------- | ------------- | --------- |
 | `RuleJudge`       | hand-written rules (deny `rm -rf`, confirm writes) | free, instant | M1        |
-| `LocalModelJudge` | tiny instruct model via Ollama → ALLOW/CONFIRM/DENY | free, offline | M2–M3     |
-| `JevJudge`        | TypeSafe's cloud decision model                  | ~pennies     | M4 (opt.) |
+| `LocalModelJudge` | tiny instruct model via Ollama → ALLOW/CONFIRM/DENY | free, offline | M2–M3    |
+| `JevJudge`        | TypeSafe's cloud decision model                      | ~pennies      | M4 (opt.) |
 
 Develop entirely against `RuleJudge` for free; swap in the others only to compare behavior.
 
@@ -65,61 +65,71 @@ Develop entirely against `RuleJudge` for free; swap in the others only to compar
 
 ## Crate shortlist (the Rust syllabus)
 
-| Concern            | Crate                         | Introduced |
-|--------------------|-------------------------------|-----------|
-| JSON               | `serde`, `serde_json`         | M0        |
-| HTTP               | `reqwest` (blocking first)    | M0        |
-| Errors             | `thiserror` (lib) + `anyhow` (app) | M0   |
-| CLI args           | `clap` (derive)               | M0        |
-| Async runtime      | `tokio`                       | Async MS  |
-| Async traits       | `async-trait` (or native)     | M1/async  |
-| TUI                | `ratatui` + `crossterm`       | M3        |
-| Config / secrets   | `dotenvy` + hand-rolled config | M0–M4    |
+| Concern          | Crate                                  | Introduced |
+| ---------------- | -------------------------------------- | ---------- |
+| JSON             | `serde`, `serde_json`              | M0         |
+| HTTP             | `reqwest` (blocking first)           | M0         |
+| Errors           | `thiserror` (lib) + `anyhow` (app) | M0         |
+| CLI args         | `clap` (derive)                      | M0         |
+| Async runtime    | `tokio`                              | Async MS   |
+| Async traits     | `async-trait` (or native)            | M1/async   |
+| TUI              | `ratatui` + `crossterm`            | M3         |
+| Config / secrets | `dotenvy` + hand-rolled config       | M0–M4     |
 
 ---
 
 ## Milestones
 
 ### M0 — Skeleton that talks  *(synchronous, no async yet)*
-- [x] `cargo new`, project layout, `clap` one-shot CLI (`agent "prompt"`)
-- [x] `LlmProvider` trait + Anthropic implementation (blocking `reqwest`)
-- [x] Ollama implementation (local, free) behind the same trait — `--provider` flag
-- [x] Runtime provider selection via `Box<dyn LlmProvider>` (trait objects, pulled forward from M1)
-- [x] Request/Response structs with `serde`
-- [x] Read API key from env / `.env` (only when Anthropic is selected)
-- [x] **Goal:** see a real model reply printed in the terminal ✅ (via local Ollama llama3.1)
+
+- [X] `cargo new`, project layout, `clap` one-shot CLI (`agent "prompt"`)
+- [X] `LlmProvider` trait + Anthropic implementation (blocking `reqwest`)
+- [X] Ollama implementation (local, free) behind the same trait — `--provider` flag
+- [X] Runtime provider selection via `Box<dyn LlmProvider>` (trait objects, pulled forward from M1)
+- [X] Request/Response structs with `serde`
+- [X] Read API key from env / `.env` (only when Anthropic is selected)
+- [X] **Goal:** see a real model reply printed in the terminal ✅ (via local Ollama llama3.1)
+
 - Concepts: structs, enums, `match`, `Option`/`Result`, `?`, basic ownership
 
 ### M1 — The agent loop + first tool + the Judge
-- [x] `Tool` trait + `run_shell_command` (also read_file, write_file)
-- [x] Full round-trip: model requests a tool → execute → feed result back → loop
-- [x] `Judge` trait + `RuleJudge` wired into the loop — allow reads, confirm writes/shell, deny destructive
-- [x] Tool registry (`Box<dyn Tool>`), interactive confirm prompt
-- [x] **Goal:** the model completes a task using the shell, gated by the Judge ✅ (allow/confirm/deny all verified)
-- Concepts: traits, trait objects, dynamic dispatch, the borrow checker on history
 
-### Async milestone — convert to tokio ✅
-- [x] Move `LlmProvider` + `Tool` (and registry) to async via `async-trait`; `Judge` stays sync (no I/O)
-- [x] Switch to async `reqwest`; `#[tokio::main]` runtime; `tokio::fs` / `tokio::process` in tools
-- [x] **Goal:** understand *why* async exists, having felt the blocking version
-- Concepts: `async`/`await`, `tokio` runtime, futures, `async-trait` for `dyn` traits
+- [X] `Tool` trait + `run_shell_command` (also read_file, write_file)
+- [X] Full round-trip: model requests a tool → execute → feed result back → loop
+- [X] `Judge` trait + `RuleJudge` wired into the loop — allow reads, confirm writes/shell, deny destructive
+- [X] Tool registry (`Box<dyn Tool>`), interactive confirm prompt
+- [X] **Goal:** the model completes a task using the shell, gated by the Judge ✅ (allow/confirm/deny all verified)
+- [ ] Concepts: traits, trait objects, dynamic dispatch, the borrow checker on history
+
+### Async milestone — convert to tokio
+
+- [ ] Move `LlmProvider`/`Tool`/`Judge` to async
+- [ ] Switch to async `reqwest`
+- [ ] **Goal:** understand *why* async exists, having felt the blocking version
+
+- Concepts: `async`/`await`, `tokio` tasks, futures
 
 ### M2 — Broaden the tools
-- [x] `read_file`, `write_file`, `edit_file`, `list_directory`
+
+- [ ] `read_file`, `write_file`, `edit_file`, `list_dir`
 - [ ] `http_fetch`
 - [ ] `git` (status/diff/commit)
 - [ ] (optional) `LocalModelJudge` via Ollama
 - [ ] **Goal:** genuinely useful; trait design makes each tool ~30 lines
+
 - Concepts: `std::fs`, `std::process`, repeated patterns
 
 ### M3 — The TUI
+
 - [ ] Replace CLI frontend with `ratatui`: scrollback, input box, spinner on tool calls
 - [ ] Tool-approval prompt in the UI (Judge's `Confirm` verdict)
 - [ ] Channels between the UI task and the agent task
 - [ ] **Goal:** agent loop underneath is untouched; only the frontend changed
+
 - Concepts: event loops, `Arc`/`Mutex`, channels
 
 ### M4 — Polish
+
 - [ ] Streaming responses
 - [ ] Conversation persistence (save/resume sessions)
 - [ ] Config file
@@ -151,6 +161,6 @@ Develop entirely against `RuleJudge` for free; swap in the others only to compar
 
 ## Open questions / decisions to revisit
 
-- [x] First concrete `LlmProvider`s: Anthropic + Ollama (both shipped at M0; default is Ollama)
+- [X] First concrete `LlmProvider`s: Anthropic + Ollama (both shipped at M0; default is Ollama)
 - [ ] Which tiny local model for `LocalModelJudge` (pick at M2)
 - [ ] Whether a purpose-built open decision model exists worth using instead of a general tiny model

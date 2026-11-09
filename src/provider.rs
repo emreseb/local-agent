@@ -89,7 +89,34 @@ pub struct CompletionResponse {
     pub usage: Option<Usage>,
 }
 
+// `Send + Sync`: the agent is handed to a background task (so the TUI can keep
+// redrawing while a model call runs), and everything it owns must be safe to
+// move to another thread. A provider is shared behind `Box<dyn LlmProvider>`,
+// so the trait object itself has to carry those guarantees.
 #[async_trait]
-pub trait LlmProvider {
+pub trait LlmProvider: Send + Sync {
     async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse>;
+
+    /// Like `complete`, but calls `on_token` with each chunk of generated text
+    /// as it arrives, so a frontend can show the answer appearing live.
+    ///
+    /// The default implementation just runs `complete` and emits the whole
+    /// answer in one chunk — so a provider that can't stream still works
+    /// through this method. Providers that *can* stream (Ollama) override it.
+    ///
+    /// `on_token` takes the chunk by value (an owned `String`): it avoids a
+    /// borrow-lifetime tangle with the async desugaring, at the cost of one
+    /// allocation per chunk — negligible. `+ Send` because the whole turn runs
+    /// on a background task.
+    async fn complete_streaming(
+        &self,
+        request: &CompletionRequest,
+        on_token: &mut (dyn FnMut(String) + Send),
+    ) -> Result<CompletionResponse> {
+        let response = self.complete(request).await?;
+        if !response.text.is_empty() {
+            on_token(response.text.clone());
+        }
+        Ok(response)
+    }
 }

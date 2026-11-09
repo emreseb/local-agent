@@ -31,6 +31,19 @@ impl TurnStats {
             self.output_tokens as f64 / (self.eval_duration_ns as f64 / 1e9)
         }
     }
+
+    /// One-line summary for a status bar or footer. Shared by every frontend so
+    /// the CLI and the TUI report a turn the same way.
+    pub fn summary(&self) -> String {
+        format!(
+            "[{:.1}s · {} tok · {:.1} tok/s · {} call{}]",
+            self.elapsed.as_secs_f64(),
+            self.output_tokens,
+            self.tokens_per_second(),
+            self.model_calls,
+            if self.model_calls == 1 { "" } else { "s" },
+        )
+    }
 }
 
 pub struct Agent {
@@ -71,6 +84,11 @@ impl Agent {
         self.messages.clear();
     }
 
+    /// The model name, for display in a status bar / footer.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
     /// Run one user turn: send the conversation, run any tools the model asks
     /// for (gated by the Judge), loop until it answers in plain text. Progress
     /// goes to `ui`; returns timing/token stats for the whole turn.
@@ -95,16 +113,25 @@ impl Agent {
                 tools: specs.clone(),
             };
 
-            let response = self.provider.complete(&request).await?;
+            // Stream the reply: each chunk becomes a `Token` event for live
+            // display, then `AssistantEnd` tells the frontend the message is
+            // whole. The closure borrows `ui` only for the duration of the call.
+            let response = self
+                .provider
+                .complete_streaming(&request, &mut |tok| {
+                    ui.emit(Event::Token(tok));
+                })
+                .await?;
+            ui.emit(Event::AssistantEnd);
             model_calls += 1;
             if let Some(usage) = &response.usage {
                 output_tokens += usage.output_tokens;
                 eval_duration_ns += usage.eval_duration_ns;
             }
 
-            // No tool calls -> the model is done. Record it and return stats.
+            // No tool calls -> the model is done. The text already streamed, so
+            // we only need to record it in history and return stats.
             if response.tool_calls.is_empty() {
-                ui.emit(Event::Assistant(response.text.clone()));
                 self.messages
                     .push(Message::assistant(response.text, Vec::new()));
                 return Ok(TurnStats {

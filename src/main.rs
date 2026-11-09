@@ -11,11 +11,14 @@ mod tui;
 mod ui;
 
 use std::io::{self, BufRead, Write};
+use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
+use tokio::sync::Mutex;
 
-use crate::agent::{Agent, TurnStats};
+use crate::agent::Agent;
 use crate::anthropic::AnthropicProvider;
 use crate::judge::RuleJudge;
 use crate::ollama::OllamaProvider;
@@ -23,7 +26,7 @@ use crate::provider::LlmProvider;
 use crate::tools::{
     Browse, EditFile, ListDirectory, ReadFile, RunShellCommand, ToolRegistry, WriteFile,
 };
-use crate::tui::{Action, TuiUi};
+use crate::tui::{Action, ChannelUi, ToUi, TuiUi};
 use crate::ui::CliUi;
 
 /// Which backend to talk to.
@@ -95,8 +98,10 @@ async fn main() -> Result<()> {
     registry.register(Box::new(Browse));
 
     // The Judge needs the workspace root to tell in-project actions from ones
-    // that reach outside it.
+    // that reach outside it. Grab a pretty version of it for the TUI footer
+    // before the path is moved into the Judge.
     let workspace = std::env::current_dir().context("could not determine the current directory")?;
+    let dir = pretty_dir(&workspace);
 
     let mut agent = Agent::new(
         provider,
@@ -108,14 +113,14 @@ async fn main() -> Result<()> {
     );
 
     if cli.tui {
-        run_tui(agent).await?;
+        run_tui(agent, dir).await?;
     } else {
         match cli.prompt {
             // A prompt on the command line -> one-shot, print stats, exit.
             Some(prompt) => {
-                let mut ui = CliUi;
+                let mut ui = CliUi::default();
                 let stats = agent.send(&prompt, &mut ui).await?;
-                eprintln!("\x1b[2m{}\x1b[0m", format_stats(&stats));
+                eprintln!("\x1b[2m{}\x1b[0m", stats.summary());
             }
             // No prompt -> interactive chat.
             None => repl(agent).await?,
@@ -125,22 +130,41 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// The full-screen TUI loop: read a prompt, run the agent (which draws its
-/// progress through `TuiUi`), show stats, repeat. The terminal is restored when
-/// `TuiUi` drops.
-async fn run_tui(mut agent: Agent) -> Result<()> {
-    let mut tui = TuiUi::new()?;
+/// The full-screen TUI loop. Each turn runs on a background task so the UI can
+/// keep animating while the model thinks; the two sides talk over a channel.
+///
+/// The agent lives behind `Arc<Mutex<_>>`: the background task locks it for the
+/// duration of a turn, and because the state is shared (not moved into the
+/// task), a Ctrl-C that aborts the task still leaves the agent intact for the
+/// next prompt. The terminal is restored when `TuiUi` drops.
+async fn run_tui(agent: Agent, dir: String) -> Result<()> {
+    let model = agent.model().to_string();
+    let agent = Arc::new(Mutex::new(agent));
+    let mut tui = TuiUi::new(dir, model)?;
+
     loop {
         match tui.read_prompt()? {
             Action::Quit => break,
             Action::Clear => {
-                agent.clear();
+                agent.lock().await.clear();
                 tui.clear_log();
             }
-            Action::Prompt(prompt) => match agent.send(&prompt, &mut tui).await {
-                Ok(stats) => tui.set_status(format_stats(&stats)),
-                Err(e) => tui.push_error(format!("error: {e:#}")),
-            },
+            Action::Prompt(prompt) => {
+                // One channel per turn: the agent task sends events, the UI loop
+                // receives them.
+                let (tx, rx) = std::sync::mpsc::channel::<ToUi>();
+                let agent = Arc::clone(&agent);
+
+                let handle = tokio::spawn(async move {
+                    let mut ui = ChannelUi::new(tx.clone());
+                    let result = agent.lock().await.send(&prompt, &mut ui).await;
+                    // Signal completion down the same channel the UI is draining.
+                    let _ = tx.send(ToUi::Done(result.map_err(|e| format!("{e:#}"))));
+                });
+
+                // Drive the screen until the turn finishes (or is interrupted).
+                tui.run_turn(&rx, &handle)?;
+            }
         }
     }
     Ok(())
@@ -152,7 +176,7 @@ async fn repl(mut agent: Agent) -> Result<()> {
     println!("local-agent REPL — type a prompt and press Enter.");
     println!("commands: 'clear' (forget context), 'exit' (quit).\n");
 
-    let mut ui = CliUi;
+    let mut ui = CliUi::default();
     let stdin = io::stdin();
     loop {
         print!("\x1b[1m» \x1b[0m");
@@ -178,7 +202,7 @@ async fn repl(mut agent: Agent) -> Result<()> {
         }
 
         match agent.send(input, &mut ui).await {
-            Ok(stats) => eprintln!("\x1b[2m{}\x1b[0m", format_stats(&stats)),
+            Ok(stats) => eprintln!("\x1b[2m{}\x1b[0m", stats.summary()),
             Err(e) => eprintln!("\x1b[31merror: {e:#}\x1b[0m"),
         }
     }
@@ -187,14 +211,13 @@ async fn repl(mut agent: Agent) -> Result<()> {
     Ok(())
 }
 
-/// One-line, dim stats summary printed after each turn.
-fn format_stats(s: &TurnStats) -> String {
-    format!(
-        "[{:.1}s · {} tok · {:.1} tok/s · {} call{}]",
-        s.elapsed.as_secs_f64(),
-        s.output_tokens,
-        s.tokens_per_second(),
-        s.model_calls,
-        if s.model_calls == 1 { "" } else { "s" },
-    )
+/// The working directory as a string, with `$HOME` shortened to `~`.
+fn pretty_dir(path: &Path) -> String {
+    let full = path.display().to_string();
+    if let Ok(home) = std::env::var("HOME") {
+        if let Some(rest) = full.strip_prefix(&home) {
+            return format!("~{rest}");
+        }
+    }
+    full
 }

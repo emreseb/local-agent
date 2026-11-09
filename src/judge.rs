@@ -23,7 +23,8 @@ pub enum Verdict {
     Deny(String),
 }
 
-pub trait Judge {
+// `Send + Sync` so the agent that owns the judge can move to a background task.
+pub trait Judge: Send + Sync {
     fn verdict(&self, call: &ToolCall) -> Verdict;
 }
 
