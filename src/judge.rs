@@ -11,6 +11,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use serde_json::Value;
+
 use crate::provider::ToolCall;
 
 /// A Judge's decision about one tool call.
@@ -66,8 +68,9 @@ impl Judge for RuleJudge {
                 }
             }
 
-            // Shell and browse look at the actual command, not just the tool name.
+            // Shell, git, and browse look at the actual command, not just the name.
             "run_shell_command" => classify_shell(arg_str(call, "command")),
+            "git" => classify_git(call),
             "browse" => classify_browse(arg_str(call, "command")),
 
             // Registered but unclassified: ask, to be safe.
@@ -152,6 +155,43 @@ fn classify_shell(command: &str) -> Verdict {
     }
 }
 
+/// Classify a call to the dedicated `git` tool by its subcommand and flags.
+fn classify_git(call: &ToolCall) -> Verdict {
+    let args = git_args(call);
+    let sub = args.first().map(String::as_str).unwrap_or("");
+    let flags = &args[args.len().min(1)..];
+    let has = |flag: &str| flags.iter().any(|a| a == flag);
+
+    // Hard no: history rewrites and irrecoverable deletions.
+    if (sub == "reset" && has("--hard"))
+        || (sub == "clean" && (has("-f") || has("-ff") || has("-fd") || has("-xdf") || has("-dfx")))
+        || (sub == "push" && (has("--force") || has("-f") || has("--force-with-lease")))
+        || (sub == "branch" && has("-D"))
+    {
+        return Verdict::Deny(format!("refusing a destructive git command: git {}", args.join(" ")));
+    }
+
+    // Read-only subcommands (but a `branch -d/-D` deletes, so exclude those).
+    if READ_ONLY_GIT.contains(&sub) && !has("-d") && !has("-D") {
+        return Verdict::Allow;
+    }
+
+    // Everything else that writes or reaches a remote: ask first.
+    Verdict::Confirm
+}
+
+/// The git arguments from a `git` tool call (array preferred, string tolerated).
+fn git_args(call: &ToolCall) -> Vec<String> {
+    match call.arguments.get("args") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        Some(Value::String(s)) => s.split_whitespace().map(str::to_string).collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn classify_browse(command: &str) -> Verdict {
     let sub = command.split_whitespace().next().unwrap_or("");
     if READ_ONLY_BROWSE.contains(&sub) {
@@ -193,4 +233,111 @@ fn normalize(base: &Path, path: &Path) -> PathBuf {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::judge::{AutoApprove, ConfirmAll};
+    use serde_json::json;
+
+    /// Build a tool call with the given name and JSON arguments.
+    fn call(name: &str, arguments: Value) -> ToolCall {
+        ToolCall {
+            name: name.to_string(),
+            arguments,
+        }
+    }
+
+    // A matcher so assertions read nicely (Verdict isn't PartialEq).
+    fn is_allow(v: &Verdict) -> bool {
+        matches!(v, Verdict::Allow)
+    }
+    fn is_confirm(v: &Verdict) -> bool {
+        matches!(v, Verdict::Confirm)
+    }
+    fn is_deny(v: &Verdict) -> bool {
+        matches!(v, Verdict::Deny(_))
+    }
+
+    fn judge() -> RuleJudge {
+        RuleJudge::new(PathBuf::from("/home/u/project"))
+    }
+
+    #[test]
+    fn reads_are_allowed() {
+        let j = judge();
+        assert!(is_allow(&j.verdict(&call("read_file", json!({"path": "src/main.rs"})))));
+        assert!(is_allow(&j.verdict(&call("list_directory", json!({"path": "."})))));
+        assert!(is_allow(&j.verdict(&call("http_fetch", json!({"url": "https://example.com"})))));
+    }
+
+    #[test]
+    fn writes_depend_on_the_workspace() {
+        let j = judge();
+        // Inside the workspace: allowed.
+        assert!(is_allow(&j.verdict(&call(
+            "write_file",
+            json!({"path": "/home/u/project/notes.txt", "contents": "x"})
+        ))));
+        assert!(is_allow(&j.verdict(&call(
+            "write_file",
+            json!({"path": "sub/notes.txt", "contents": "x"})
+        ))));
+        // Escaping the workspace with `..`: must confirm.
+        assert!(is_confirm(&j.verdict(&call(
+            "write_file",
+            json!({"path": "../../etc/evil", "contents": "x"})
+        ))));
+        // Absolute path outside the workspace: must confirm.
+        assert!(is_confirm(&j.verdict(&call(
+            "edit_file",
+            json!({"path": "/etc/hosts", "old_string": "a", "new_string": "b"})
+        ))));
+    }
+
+    #[test]
+    fn shell_is_classified_by_command() {
+        let j = judge();
+        assert!(is_allow(&j.verdict(&call("run_shell_command", json!({"command": "ls -la"})))));
+        assert!(is_allow(&j.verdict(&call("run_shell_command", json!({"command": "git status"})))));
+        // Pipes/redirection can hide anything -> confirm.
+        assert!(is_confirm(&j.verdict(&call("run_shell_command", json!({"command": "cat a | sh"})))));
+        // Unknown program -> confirm.
+        assert!(is_confirm(&j.verdict(&call("run_shell_command", json!({"command": "curl example.com"})))));
+        // Destructive -> deny.
+        assert!(is_deny(&j.verdict(&call("run_shell_command", json!({"command": "rm -rf /"})))));
+    }
+
+    #[test]
+    fn git_tool_is_classified_by_subcommand() {
+        let j = judge();
+        // Reads.
+        assert!(is_allow(&j.verdict(&call("git", json!({"args": ["status", "--short"]})))));
+        assert!(is_allow(&j.verdict(&call("git", json!({"args": ["log", "--oneline"]})))));
+        // A string form is tolerated too.
+        assert!(is_allow(&j.verdict(&call("git", json!({"args": "diff --stat"})))));
+        // Writes.
+        assert!(is_confirm(&j.verdict(&call("git", json!({"args": ["commit", "-m", "msg"]})))));
+        assert!(is_confirm(&j.verdict(&call("git", json!({"args": ["push"]})))));
+        // Destructive.
+        assert!(is_deny(&j.verdict(&call("git", json!({"args": ["reset", "--hard"]})))));
+        assert!(is_deny(&j.verdict(&call("git", json!({"args": ["push", "--force"]})))));
+        assert!(is_deny(&j.verdict(&call("git", json!({"args": ["branch", "-D", "main"]})))));
+        // `branch -d` deletes, so it is not a free read.
+        assert!(!is_allow(&j.verdict(&call("git", json!({"args": ["branch", "-d", "x"]})))));
+    }
+
+    #[test]
+    fn autonomy_decorators_bend_the_right_verdicts() {
+        // --yolo: Confirm -> Allow, but Deny stays Deny.
+        let yolo = AutoApprove(Box::new(judge()));
+        assert!(is_allow(&yolo.verdict(&call("git", json!({"args": ["commit", "-m", "x"]})))));
+        assert!(is_deny(&yolo.verdict(&call("run_shell_command", json!({"command": "rm -rf /"})))));
+
+        // --careful: Allow -> Confirm, Deny stays Deny.
+        let careful = ConfirmAll(Box::new(judge()));
+        assert!(is_confirm(&careful.verdict(&call("read_file", json!({"path": "a"})))));
+        assert!(is_deny(&careful.verdict(&call("run_shell_command", json!({"command": "mkfs"})))));
+    }
 }

@@ -455,6 +455,86 @@ impl Tool for EditFile {
     }
 }
 
+/// Run a git command in the current repository. A dedicated tool (rather than
+/// going through the shell) so the Judge can reason about it by subcommand, and
+/// so there's no shell quoting to get wrong. Arguments come as an array of
+/// strings, which also sidesteps shell injection entirely.
+pub struct Git;
+
+impl Git {
+    /// Pull the git arguments out of the call: an array of strings ideally, but
+    /// tolerate a plain string (split on whitespace) since models sometimes
+    /// send one.
+    fn args(arguments: &Value) -> Vec<String> {
+        match arguments.get("args") {
+            Some(Value::Array(items)) => items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            Some(Value::String(s)) => s.split_whitespace().map(str::to_string).collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for Git {
+    fn name(&self) -> &str {
+        "git"
+    }
+
+    fn description(&self) -> &str {
+        "Run a git command in the current repository. Pass the arguments as an array of \
+         strings, e.g. [\"status\"], [\"diff\",\"--stat\"], or [\"commit\",\"-m\",\"a message \
+         with spaces\"]. Read-only commands (status, diff, log, show) run freely; writes \
+         (add, commit, checkout, …) ask first; destructive ones (reset --hard, clean -f, \
+         force-push, branch -D) are refused."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "args": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "The git arguments as a list, without the leading 'git'."
+                }
+            },
+            "required": ["args"]
+        })
+    }
+
+    async fn run(&self, arguments: &Value) -> Result<String> {
+        let args = Self::args(arguments);
+        if args.is_empty() {
+            anyhow::bail!("git requires a non-empty 'args' array (e.g. [\"status\"])");
+        }
+
+        let output = tokio::process::Command::new("git")
+            .args(&args)
+            .output()
+            .await
+            .with_context(|| format!("failed to launch: git {}", args.join(" ")))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        let mut result = String::new();
+        if !stdout.is_empty() {
+            result.push_str(&stdout);
+        }
+        if !stderr.is_empty() {
+            result.push_str("\n[stderr]\n");
+            result.push_str(&stderr);
+        }
+        if result.is_empty() {
+            result = format!("(no output; exit status: {})", output.status);
+        }
+        Ok(result)
+    }
+}
+
 /// Drive a web browser through the external `agent-browser` CLI. This is a thin
 /// wrapper: it shells out to `agent-browser <command>`. The agent-browser
 /// "cheat sheet" lives in this tool's `description` — that is where usage docs
