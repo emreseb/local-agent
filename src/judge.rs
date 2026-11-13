@@ -308,6 +308,7 @@ mod tests {
         ToolCall {
             name: name.to_string(),
             arguments,
+            id: None,
         }
     }
 

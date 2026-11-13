@@ -219,8 +219,11 @@ impl Agent {
                 };
 
                 ui.emit(Event::ToolResult(result.clone()));
-                self.messages
-                    .push(Message::tool_result(call.name.clone(), result));
+                self.messages.push(Message::tool_result(
+                    call.name.clone(),
+                    call.id.clone(),
+                    result,
+                ));
             }
         }
 

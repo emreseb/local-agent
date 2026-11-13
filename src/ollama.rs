@@ -171,6 +171,7 @@ fn to_tool_calls(wire: Vec<WireToolCall>) -> Vec<ToolCall> {
         .map(|c| ToolCall {
             name: c.function.name,
             arguments: c.function.arguments,
+            id: None,
         })
         .collect()
 }

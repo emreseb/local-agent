@@ -23,6 +23,10 @@ pub struct ToolSpec {
 pub struct ToolCall {
     pub name: String,
     pub arguments: Value,
+    /// Provider-assigned id for this call. Anthropic needs it to match a tool
+    /// result back to its call; Ollama correlates by order, so leaves it `None`.
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 /// One turn of the conversation. Which fields are set depends on the role:
@@ -37,25 +41,45 @@ pub struct Message {
     pub tool_calls: Vec<ToolCall>,
     #[serde(default)]
     pub tool_name: Option<String>,
+    /// On a tool-result message: the id of the `ToolCall` it answers (Anthropic).
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
 }
 
 // Small constructors so callers don't fill in every field by hand. `impl Into<String>`
 // lets you pass either a &str or a String.
 impl Message {
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: "user".into(), content: content.into(), tool_calls: Vec::new(), tool_name: None }
+        Self {
+            role: "user".into(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_name: None,
+            tool_call_id: None,
+        }
     }
 
     pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
-        Self { role: "assistant".into(), content: content.into(), tool_calls, tool_name: None }
+        Self {
+            role: "assistant".into(),
+            content: content.into(),
+            tool_calls,
+            tool_name: None,
+            tool_call_id: None,
+        }
     }
 
-    pub fn tool_result(tool_name: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn tool_result(
+        tool_name: impl Into<String>,
+        tool_call_id: Option<String>,
+        content: impl Into<String>,
+    ) -> Self {
         Self {
             role: "tool".into(),
             content: content.into(),
             tool_calls: Vec::new(),
             tool_name: Some(tool_name.into()),
+            tool_call_id,
         }
     }
 }
