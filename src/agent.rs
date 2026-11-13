@@ -2,9 +2,10 @@
 //! conversation. `send` runs one user turn (the tool loop) and reports progress
 //! through a `Ui` (which prints, or draws the TUI) instead of printing itself.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::judge::{Judge, Verdict};
 use crate::provider::{CompletionRequest, LlmProvider, Message};
@@ -55,6 +56,9 @@ pub struct Agent {
     judge: Box<dyn Judge>,
     system: String,
     messages: Vec<Message>,
+    /// If set, the conversation is saved here after every turn and can be
+    /// reloaded with `load_session` to resume later.
+    session: Option<PathBuf>,
 }
 
 impl Agent {
@@ -76,17 +80,54 @@ impl Agent {
             judge,
             system,
             messages: Vec::new(),
+            session: None,
         }
     }
 
     /// Forget the conversation so far (the REPL `clear` command).
     pub fn clear(&mut self) {
         self.messages.clear();
+        self.save_session();
     }
 
     /// The model name, for display in a status bar / footer.
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Point the agent at a session file. With one set, every turn is saved
+    /// there; `load_session` reads it back.
+    pub fn set_session(&mut self, path: Option<PathBuf>) {
+        self.session = path;
+    }
+
+    /// Load a saved conversation from the session file, if one is set and
+    /// exists. A missing file is not an error — it's just a fresh session.
+    pub fn load_session(&mut self) -> Result<()> {
+        if let Some(path) = &self.session {
+            if path.exists() {
+                let data = std::fs::read_to_string(path)
+                    .with_context(|| format!("could not read session file '{}'", path.display()))?;
+                self.messages = serde_json::from_str(&data)
+                    .with_context(|| format!("could not parse session file '{}'", path.display()))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Write the conversation to the session file. Best-effort: a failure here
+    /// should never crash a turn, so it's logged to stderr and swallowed.
+    fn save_session(&self) {
+        if let Some(path) = &self.session {
+            match serde_json::to_string_pretty(&self.messages) {
+                Ok(data) => {
+                    if let Err(e) = std::fs::write(path, data) {
+                        eprintln!("\x1b[2m(could not save session: {e})\x1b[0m");
+                    }
+                }
+                Err(e) => eprintln!("\x1b[2m(could not serialize session: {e})\x1b[0m"),
+            }
+        }
     }
 
     /// Run one user turn: send the conversation, run any tools the model asks
@@ -134,6 +175,7 @@ impl Agent {
             if response.tool_calls.is_empty() {
                 self.messages
                     .push(Message::assistant(response.text, Vec::new()));
+                self.save_session();
                 return Ok(TurnStats {
                     elapsed: start.elapsed(),
                     output_tokens,

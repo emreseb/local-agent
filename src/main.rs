@@ -90,6 +90,11 @@ struct Cli {
     /// Model for the `--judge model` judge (defaults to the main Ollama model).
     #[arg(long)]
     judge_model: Option<String>,
+
+    /// Save the conversation to this file after every turn, and resume from it
+    /// on startup if it already exists.
+    #[arg(long)]
+    session: Option<std::path::PathBuf>,
 }
 
 #[tokio::main]
@@ -152,6 +157,10 @@ async fn main() -> Result<()> {
     }
 
     let mut agent = Agent::new(provider, model, cli.max_tokens, cli.temperature, registry, judge);
+
+    // Wire up the session file (if any) and resume a prior conversation.
+    agent.set_session(cli.session.clone());
+    agent.load_session()?;
 
     if cli.tui {
         run_tui(agent, dir).await?;

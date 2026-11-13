@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// A tool we advertise to the model: its name, what it does, and a JSON Schema
@@ -18,7 +19,7 @@ pub struct ToolSpec {
 
 /// The model's request to call one tool. `arguments` is arbitrary JSON that
 /// should match the tool's schema.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub name: String,
     pub arguments: Value,
@@ -28,11 +29,13 @@ pub struct ToolCall {
 /// - user turn:   role "user",      `content` set
 /// - assistant:   role "assistant", `content` and/or `tool_calls` set
 /// - tool result: role "tool",      `content` set, `tool_name` set
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
     pub content: String,
+    #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
+    #[serde(default)]
     pub tool_name: Option<String>,
 }
 
