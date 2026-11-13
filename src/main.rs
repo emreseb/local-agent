@@ -124,6 +124,12 @@ struct Cli {
     /// List the available tools and exit.
     #[arg(long)]
     list_tools: bool,
+
+    /// Comma-separated list of tools to enable (default: all). Small local
+    /// models tool-call far more reliably with a focused set, e.g.
+    /// --tools read_file,run_shell_command,list_directory
+    #[arg(long)]
+    tools: Option<String>,
 }
 
 #[tokio::main]
@@ -159,16 +165,56 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Register the tools the agent may use.
+    // Register the tools the agent may use. With --tools, only the named subset
+    // is enabled — a smaller, less-overlapping set makes small models far more
+    // reliable at choosing and emitting tool calls.
+    let enabled: Option<Vec<String>> = cli.tools.as_ref().map(|s| {
+        s.split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect()
+    });
+    let want = |name: &str| {
+        enabled
+            .as_ref()
+            .is_none_or(|list| list.iter().any(|t| t == name))
+    };
+
     let mut registry = ToolRegistry::new();
-    registry.register(Box::new(ReadFile));
-    registry.register(Box::new(WriteFile));
-    registry.register(Box::new(RunShellCommand));
-    registry.register(Box::new(ListDirectory));
-    registry.register(Box::new(EditFile));
-    registry.register(Box::new(Browse));
-    registry.register(Box::new(HttpFetch::new()));
-    registry.register(Box::new(Git));
+    if want("read_file") {
+        registry.register(Box::new(ReadFile));
+    }
+    if want("write_file") {
+        registry.register(Box::new(WriteFile));
+    }
+    if want("run_shell_command") {
+        registry.register(Box::new(RunShellCommand));
+    }
+    if want("list_directory") {
+        registry.register(Box::new(ListDirectory));
+    }
+    if want("edit_file") {
+        registry.register(Box::new(EditFile));
+    }
+    if want("browse") {
+        registry.register(Box::new(Browse));
+    }
+    if want("http_fetch") {
+        registry.register(Box::new(HttpFetch::new()));
+    }
+    if want("git") {
+        registry.register(Box::new(Git));
+    }
+
+    // Warn about any requested tool name that doesn't exist.
+    if let Some(list) = &enabled {
+        let known = registry.names();
+        for name in list {
+            if !known.iter().any(|k| k == name) {
+                eprintln!("\x1b[33mwarning: unknown tool '{name}' (ignored)\x1b[0m");
+            }
+        }
+    }
 
     // `--list-tools`: print the registered tools and exit.
     if cli.list_tools {

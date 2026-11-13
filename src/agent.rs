@@ -179,6 +179,13 @@ impl Agent {
                     ui.emit(Event::Token(tok));
                 })
                 .await?;
+            // If the model returned nothing and isn't calling a tool, surface
+            // that instead of looking like it silently ignored the request.
+            if response.tool_calls.is_empty() && response.text.trim().is_empty() {
+                ui.emit(Event::Token(
+                    "(the model returned an empty response — try rephrasing)".to_string(),
+                ));
+            }
             ui.emit(Event::AssistantEnd);
             model_calls += 1;
             if let Some(usage) = &response.usage {
@@ -250,10 +257,15 @@ fn build_system_prompt(registry: &ToolRegistry) -> String {
         .unwrap_or_else(|_| ".".to_string());
     let tool_list = registry.names().join(", ");
 
+    // Keep this short and free of literal JSON examples: a 7B model will happily
+    // copy an example tool-call into its *text* output instead of making a real
+    // structured call. We describe intent, not syntax — the tool schemas carry
+    // the syntax.
     format!(
-        "You are a helpful assistant running in {cwd} with these tools: {tool_list}. \
-         When the user refers to a file, use read_file to read it and answer from its actual contents. \
-         Pass file paths exactly as the user gives them; relative paths resolve from {cwd}. \
-         Answer concisely."
+        "You are a concise agent working in {cwd}. Available tools: {tool_list}. \
+         When the user asks you to do something a tool can do, use the tool directly \
+         instead of describing it or asking permission first. Read files the user \
+         mentions with read_file and answer from their actual contents. Pass file \
+         paths exactly as given; relative paths resolve from {cwd}. Answer concisely."
     )
 }

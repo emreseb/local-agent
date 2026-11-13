@@ -484,11 +484,13 @@ impl Tool for Git {
     }
 
     fn description(&self) -> &str {
-        "Run a git command in the current repository. Pass the arguments as an array of \
-         strings, e.g. [\"status\"], [\"diff\",\"--stat\"], or [\"commit\",\"-m\",\"a message \
-         with spaces\"]. Read-only commands (status, diff, log, show) run freely; writes \
-         (add, commit, checkout, …) ask first; destructive ones (reset --hard, clean -f, \
-         force-push, branch -D) are refused."
+        // Keep this free of literal JSON array examples: a small model copies
+        // them into its text output instead of making a real structured call.
+        // The `args` schema already says it's a list of strings.
+        "Run a git command in the current repository. Put the arguments (without the \
+         leading 'git') in args as separate items, for example status, or log with \
+         --oneline. Read-only commands run freely; writes are confirmed; destructive \
+         ones like reset --hard or force-push are refused."
     }
 
     fn parameters(&self) -> Value {

@@ -216,6 +216,12 @@ impl LlmProvider for OllamaProvider {
         on_token: &mut (dyn FnMut(String) + Send),
     ) -> Result<CompletionResponse> {
         let body = build_body(request, true);
+        if std::env::var_os("LA_DEBUG").is_some() {
+            eprintln!(
+                "[request] {}",
+                serde_json::to_string(&body).unwrap_or_default()
+            );
+        }
         let url = format!("{}/api/chat", self.base_url);
         let mut resp = self
             .client
@@ -248,6 +254,9 @@ impl LlmProvider for OllamaProvider {
             while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
                 // Drain up to and including the newline; parse the line before it.
                 let line: Vec<u8> = buf.drain(..=nl).collect();
+                if std::env::var_os("LA_DEBUG").is_some() {
+                    eprintln!("[chunk] {}", String::from_utf8_lossy(&line).trim());
+                }
                 handle_chunk(
                     &line,
                     on_token,

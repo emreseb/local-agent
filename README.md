@@ -62,11 +62,31 @@ Omit `PROMPT` for the REPL; add `--tui` for the full-screen UI.
 | `--session <FILE>` | Save/resume the conversation in this file. |
 | `--config <FILE>` | TOML config path (see below). |
 | `--list-tools` | Print the available tools and exit. |
+| `--tools <CSV>` | Enable only these tools (default: all). See the note below. |
 | `--tui` | Launch the full-screen TUI. |
 
 Environment: `OLLAMA_HOST` (default `http://localhost:11434`), and
 `ANTHROPIC_API_KEY` (from the environment or a `.env` file) when using
 `--provider anthropic`.
+
+## Small models & tool reliability
+
+Small local models (like the default `qwen2.5:7b`) tool-call **far more reliably
+with a focused tool set**. With all 8 tools advertised at once, a 7B model can
+get overwhelmed on an ambiguous request — e.g. "git status", which both `git`
+and `run_shell_command` could handle — and return an empty or malformed reply
+(you'll see `(the model returned an empty response …)`).
+
+Fixes, in order of effectiveness:
+
+- **Narrow the toolset** with `--tools` to just what the task needs, e.g.
+  `--tools git` for git work, or `--tools read_file,run_shell_command,list_directory`
+  for poking around a repo. This is the single biggest lever.
+- **Lower the temperature** (`--temperature 0`) for more deterministic tool choice.
+- **Use a stronger tool-use model** if your machine can run one.
+
+This is a model-capacity limitation, not a bug — the agent, tools, and Judge all
+work; the 7B model is simply near its ceiling when juggling many tools at once.
 
 ## The Judge
 
