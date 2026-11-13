@@ -156,7 +156,7 @@ impl Agent {
                     args: args.clone(),
                 });
 
-                let result = match self.judge.verdict(call) {
+                let result = match self.judge.verdict(call).await {
                     Verdict::Allow => self.registry.dispatch(&call.name, &call.arguments).await,
                     Verdict::Deny(reason) => {
                         ui.emit(Event::ToolDenied(reason.clone()));

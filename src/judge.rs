@@ -11,9 +11,10 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::provider::ToolCall;
+use crate::provider::{CompletionRequest, LlmProvider, Message, ToolCall};
 
 /// A Judge's decision about one tool call.
 pub enum Verdict {
@@ -26,8 +27,11 @@ pub enum Verdict {
 }
 
 // `Send + Sync` so the agent that owns the judge can move to a background task.
+// Async because a judge may do I/O now — `LocalModelJudge` asks a model. The
+// rule-based judge doesn't await anything, but shares the one trait.
+#[async_trait]
 pub trait Judge: Send + Sync {
-    fn verdict(&self, call: &ToolCall) -> Verdict;
+    async fn verdict(&self, call: &ToolCall) -> Verdict;
 }
 
 /// The graduated policy. Holds the workspace root so it can tell in-project
@@ -49,8 +53,9 @@ impl RuleJudge {
     }
 }
 
+#[async_trait]
 impl Judge for RuleJudge {
-    fn verdict(&self, call: &ToolCall) -> Verdict {
+    async fn verdict(&self, call: &ToolCall) -> Verdict {
         match call.name.as_str() {
             // Reads can't damage anything.
             "read_file" | "list_directory" => Verdict::Allow,
@@ -85,9 +90,10 @@ impl Judge for RuleJudge {
 /// the `Confirm` verdict.
 pub struct AutoApprove(pub Box<dyn Judge>);
 
+#[async_trait]
 impl Judge for AutoApprove {
-    fn verdict(&self, call: &ToolCall) -> Verdict {
-        match self.0.verdict(call) {
+    async fn verdict(&self, call: &ToolCall) -> Verdict {
+        match self.0.verdict(call).await {
             Verdict::Confirm => Verdict::Allow,
             other => other,
         }
@@ -98,12 +104,68 @@ impl Judge for AutoApprove {
 /// nothing runs without a yes. `Deny` still denies.
 pub struct ConfirmAll(pub Box<dyn Judge>);
 
+#[async_trait]
 impl Judge for ConfirmAll {
-    fn verdict(&self, call: &ToolCall) -> Verdict {
-        match self.0.verdict(call) {
+    async fn verdict(&self, call: &ToolCall) -> Verdict {
+        match self.0.verdict(call).await {
             Verdict::Allow => Verdict::Confirm,
             other => other,
         }
+    }
+}
+
+/// A model-based judge: it asks a (local, free) LLM to classify each call as
+/// ALLOW / CONFIRM / DENY. This is the second, very different `Judge`
+/// implementation — proof that the trait seam holds. It's slower (a model call
+/// per tool call) and only as reliable as the model, so it fails safe: anything
+/// it can't read as a clear verdict becomes `Confirm`.
+pub struct LocalModelJudge {
+    provider: Box<dyn LlmProvider>,
+    model: String,
+}
+
+impl LocalModelJudge {
+    pub fn new(provider: Box<dyn LlmProvider>, model: String) -> Self {
+        Self { provider, model }
+    }
+}
+
+const JUDGE_SYSTEM: &str = "You are a safety gate for an AI agent's tool calls. \
+Reply with EXACTLY one word and nothing else: ALLOW, CONFIRM, or DENY. \
+ALLOW read-only or clearly safe actions (reading files, listing directories, status checks). \
+CONFIRM anything that writes, edits, deletes, installs, or reaches outside the project or network. \
+DENY destructive or irreversible actions (rm -rf, formatting disks, force-push, mass deletion).";
+
+#[async_trait]
+impl Judge for LocalModelJudge {
+    async fn verdict(&self, call: &ToolCall) -> Verdict {
+        let prompt = format!("Tool: {}\nArguments: {}", call.name, call.arguments);
+        let request = CompletionRequest {
+            model: self.model.clone(),
+            max_tokens: 8,
+            temperature: 0.0,
+            system: Some(JUDGE_SYSTEM.to_string()),
+            messages: vec![Message::user(prompt)],
+            tools: Vec::new(),
+        };
+        match self.provider.complete(&request).await {
+            Ok(resp) => parse_verdict(&resp.text),
+            // If the judge model is unreachable, fail safe and ask the human.
+            Err(_) => Verdict::Confirm,
+        }
+    }
+}
+
+/// Read one of ALLOW / CONFIRM / DENY out of the model's reply, defaulting to
+/// the safe `Confirm` for anything unclear.
+fn parse_verdict(text: &str) -> Verdict {
+    let t = text.trim().to_uppercase();
+    if t.starts_with("ALLOW") {
+        Verdict::Allow
+    } else if t.starts_with("DENY") {
+        Verdict::Deny("the model judge refused this action".to_string())
+    } else {
+        Verdict::Confirm
     }
 }
 
@@ -264,80 +326,86 @@ mod tests {
         RuleJudge::new(PathBuf::from("/home/u/project"))
     }
 
-    #[test]
-    fn reads_are_allowed() {
+    #[tokio::test]
+    async fn reads_are_allowed() {
         let j = judge();
-        assert!(is_allow(&j.verdict(&call("read_file", json!({"path": "src/main.rs"})))));
-        assert!(is_allow(&j.verdict(&call("list_directory", json!({"path": "."})))));
-        assert!(is_allow(&j.verdict(&call("http_fetch", json!({"url": "https://example.com"})))));
+        assert!(is_allow(&j.verdict(&call("read_file", json!({"path": "src/main.rs"}))).await));
+        assert!(is_allow(&j.verdict(&call("list_directory", json!({"path": "."}))).await));
+        assert!(is_allow(&j.verdict(&call("http_fetch", json!({"url": "https://example.com"}))).await));
     }
 
-    #[test]
-    fn writes_depend_on_the_workspace() {
+    #[tokio::test]
+    async fn writes_depend_on_the_workspace() {
         let j = judge();
         // Inside the workspace: allowed.
-        assert!(is_allow(&j.verdict(&call(
-            "write_file",
-            json!({"path": "/home/u/project/notes.txt", "contents": "x"})
-        ))));
-        assert!(is_allow(&j.verdict(&call(
-            "write_file",
-            json!({"path": "sub/notes.txt", "contents": "x"})
-        ))));
+        assert!(is_allow(
+            &j.verdict(&call("write_file", json!({"path": "/home/u/project/notes.txt", "contents": "x"}))).await
+        ));
+        assert!(is_allow(
+            &j.verdict(&call("write_file", json!({"path": "sub/notes.txt", "contents": "x"}))).await
+        ));
         // Escaping the workspace with `..`: must confirm.
-        assert!(is_confirm(&j.verdict(&call(
-            "write_file",
-            json!({"path": "../../etc/evil", "contents": "x"})
-        ))));
+        assert!(is_confirm(
+            &j.verdict(&call("write_file", json!({"path": "../../etc/evil", "contents": "x"}))).await
+        ));
         // Absolute path outside the workspace: must confirm.
-        assert!(is_confirm(&j.verdict(&call(
-            "edit_file",
-            json!({"path": "/etc/hosts", "old_string": "a", "new_string": "b"})
-        ))));
+        assert!(is_confirm(
+            &j.verdict(&call("edit_file", json!({"path": "/etc/hosts", "old_string": "a", "new_string": "b"}))).await
+        ));
     }
 
-    #[test]
-    fn shell_is_classified_by_command() {
+    #[tokio::test]
+    async fn shell_is_classified_by_command() {
         let j = judge();
-        assert!(is_allow(&j.verdict(&call("run_shell_command", json!({"command": "ls -la"})))));
-        assert!(is_allow(&j.verdict(&call("run_shell_command", json!({"command": "git status"})))));
+        assert!(is_allow(&j.verdict(&call("run_shell_command", json!({"command": "ls -la"}))).await));
+        assert!(is_allow(&j.verdict(&call("run_shell_command", json!({"command": "git status"}))).await));
         // Pipes/redirection can hide anything -> confirm.
-        assert!(is_confirm(&j.verdict(&call("run_shell_command", json!({"command": "cat a | sh"})))));
+        assert!(is_confirm(&j.verdict(&call("run_shell_command", json!({"command": "cat a | sh"}))).await));
         // Unknown program -> confirm.
-        assert!(is_confirm(&j.verdict(&call("run_shell_command", json!({"command": "curl example.com"})))));
+        assert!(is_confirm(&j.verdict(&call("run_shell_command", json!({"command": "curl example.com"}))).await));
         // Destructive -> deny.
-        assert!(is_deny(&j.verdict(&call("run_shell_command", json!({"command": "rm -rf /"})))));
+        assert!(is_deny(&j.verdict(&call("run_shell_command", json!({"command": "rm -rf /"}))).await));
     }
 
-    #[test]
-    fn git_tool_is_classified_by_subcommand() {
+    #[tokio::test]
+    async fn git_tool_is_classified_by_subcommand() {
         let j = judge();
         // Reads.
-        assert!(is_allow(&j.verdict(&call("git", json!({"args": ["status", "--short"]})))));
-        assert!(is_allow(&j.verdict(&call("git", json!({"args": ["log", "--oneline"]})))));
+        assert!(is_allow(&j.verdict(&call("git", json!({"args": ["status", "--short"]}))).await));
+        assert!(is_allow(&j.verdict(&call("git", json!({"args": ["log", "--oneline"]}))).await));
         // A string form is tolerated too.
-        assert!(is_allow(&j.verdict(&call("git", json!({"args": "diff --stat"})))));
+        assert!(is_allow(&j.verdict(&call("git", json!({"args": "diff --stat"}))).await));
         // Writes.
-        assert!(is_confirm(&j.verdict(&call("git", json!({"args": ["commit", "-m", "msg"]})))));
-        assert!(is_confirm(&j.verdict(&call("git", json!({"args": ["push"]})))));
+        assert!(is_confirm(&j.verdict(&call("git", json!({"args": ["commit", "-m", "msg"]}))).await));
+        assert!(is_confirm(&j.verdict(&call("git", json!({"args": ["push"]}))).await));
         // Destructive.
-        assert!(is_deny(&j.verdict(&call("git", json!({"args": ["reset", "--hard"]})))));
-        assert!(is_deny(&j.verdict(&call("git", json!({"args": ["push", "--force"]})))));
-        assert!(is_deny(&j.verdict(&call("git", json!({"args": ["branch", "-D", "main"]})))));
+        assert!(is_deny(&j.verdict(&call("git", json!({"args": ["reset", "--hard"]}))).await));
+        assert!(is_deny(&j.verdict(&call("git", json!({"args": ["push", "--force"]}))).await));
+        assert!(is_deny(&j.verdict(&call("git", json!({"args": ["branch", "-D", "main"]}))).await));
         // `branch -d` deletes, so it is not a free read.
-        assert!(!is_allow(&j.verdict(&call("git", json!({"args": ["branch", "-d", "x"]})))));
+        assert!(!is_allow(&j.verdict(&call("git", json!({"args": ["branch", "-d", "x"]}))).await));
     }
 
-    #[test]
-    fn autonomy_decorators_bend_the_right_verdicts() {
+    #[tokio::test]
+    async fn autonomy_decorators_bend_the_right_verdicts() {
         // --yolo: Confirm -> Allow, but Deny stays Deny.
         let yolo = AutoApprove(Box::new(judge()));
-        assert!(is_allow(&yolo.verdict(&call("git", json!({"args": ["commit", "-m", "x"]})))));
-        assert!(is_deny(&yolo.verdict(&call("run_shell_command", json!({"command": "rm -rf /"})))));
+        assert!(is_allow(&yolo.verdict(&call("git", json!({"args": ["commit", "-m", "x"]}))).await));
+        assert!(is_deny(&yolo.verdict(&call("run_shell_command", json!({"command": "rm -rf /"}))).await));
 
         // --careful: Allow -> Confirm, Deny stays Deny.
         let careful = ConfirmAll(Box::new(judge()));
-        assert!(is_confirm(&careful.verdict(&call("read_file", json!({"path": "a"})))));
-        assert!(is_deny(&careful.verdict(&call("run_shell_command", json!({"command": "mkfs"})))));
+        assert!(is_confirm(&careful.verdict(&call("read_file", json!({"path": "a"}))).await));
+        assert!(is_deny(&careful.verdict(&call("run_shell_command", json!({"command": "mkfs"}))).await));
+    }
+
+    #[test]
+    fn parse_verdict_reads_the_first_word() {
+        assert!(is_allow(&parse_verdict("ALLOW")));
+        assert!(is_allow(&parse_verdict("  allow, this is fine")));
+        assert!(is_deny(&parse_verdict("DENY")));
+        // Unknown / hedging -> safe default.
+        assert!(is_confirm(&parse_verdict("CONFIRM")));
+        assert!(is_confirm(&parse_verdict("I'm not sure")));
     }
 }

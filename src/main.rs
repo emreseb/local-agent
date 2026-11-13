@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 
 use crate::agent::Agent;
 use crate::anthropic::AnthropicProvider;
-use crate::judge::{AutoApprove, ConfirmAll, Judge, RuleJudge};
+use crate::judge::{AutoApprove, ConfirmAll, Judge, LocalModelJudge, RuleJudge};
 use crate::ollama::OllamaProvider;
 use crate::provider::LlmProvider;
 use crate::tools::{
@@ -35,6 +35,15 @@ use crate::ui::CliUi;
 enum Provider {
     Anthropic,
     Ollama,
+}
+
+/// Which judge decides tool permissions.
+#[derive(Clone, Copy, ValueEnum)]
+enum JudgeKind {
+    /// Hand-written rules — instant, free, deterministic (the default).
+    Rule,
+    /// Ask a local LLM to classify each call — slower, experimental.
+    Model,
 }
 
 /// A local AI agent. Give it a prompt for one-shot mode, or no prompt to open
@@ -73,6 +82,14 @@ struct Cli {
     /// Confirm *every* action, even reads. Maximum paranoia.
     #[arg(long)]
     careful: bool,
+
+    /// Which judge decides tool permissions: 'rule' (default) or 'model'.
+    #[arg(long, value_enum, default_value_t = JudgeKind::Rule)]
+    judge: JudgeKind,
+
+    /// Model for the `--judge model` judge (defaults to the main Ollama model).
+    #[arg(long)]
+    judge_model: Option<String>,
 }
 
 #[tokio::main]
@@ -115,8 +132,19 @@ async fn main() -> Result<()> {
     let workspace = std::env::current_dir().context("could not determine the current directory")?;
     let dir = pretty_dir(&workspace);
 
-    // Start from the rule-based judge, then wrap it per the autonomy flags.
-    let mut judge: Box<dyn Judge> = Box::new(RuleJudge::new(workspace));
+    // Pick the base judge, then wrap it per the autonomy flags.
+    let mut judge: Box<dyn Judge> = match cli.judge {
+        JudgeKind::Rule => Box::new(RuleJudge::new(workspace)),
+        JudgeKind::Model => {
+            let base_url = std::env::var("OLLAMA_HOST")
+                .unwrap_or_else(|_| "http://localhost:11434".to_string());
+            let judge_model = cli.judge_model.clone().unwrap_or_else(|| model.clone());
+            Box::new(LocalModelJudge::new(
+                Box::new(OllamaProvider::new(base_url)),
+                judge_model,
+            ))
+        }
+    };
     if cli.yolo {
         judge = Box::new(AutoApprove(judge));
     } else if cli.careful {
