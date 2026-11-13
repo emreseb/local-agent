@@ -116,9 +116,9 @@ fn to_wire_messages(messages: &[Message]) -> Vec<WireMessage> {
                     "content": m.content,
                 });
                 // Append to the previous turn if it's already a tool-result turn.
-                if let Some(last) = out.last_mut() {
-                    if last.role == "user" {
-                        if let Value::Array(arr) = &mut last.content {
+                if let Some(last) = out.last_mut()
+                    && last.role == "user"
+                        && let Value::Array(arr) = &mut last.content {
                             let all_results = !arr.is_empty()
                                 && arr.iter().all(|b| {
                                     b.get("type").and_then(Value::as_str) == Some("tool_result")
@@ -128,8 +128,6 @@ fn to_wire_messages(messages: &[Message]) -> Vec<WireMessage> {
                                 continue;
                             }
                         }
-                    }
-                }
                 out.push(WireMessage {
                     role: "user".into(),
                     content: json!([block]),

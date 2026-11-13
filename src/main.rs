@@ -326,14 +326,13 @@ fn load_config(explicit: Option<&Path>) -> Result<FileConfig> {
         Some(p) => Some(p.to_path_buf()),
         None => default_config_path(),
     };
-    if let Some(path) = path {
-        if path.exists() {
+    if let Some(path) = path
+        && path.exists() {
             let text = std::fs::read_to_string(&path)
                 .with_context(|| format!("could not read config '{}'", path.display()))?;
             return toml::from_str(&text)
                 .with_context(|| format!("could not parse config '{}'", path.display()));
         }
-    }
     Ok(FileConfig::default())
 }
 
@@ -358,10 +357,9 @@ fn history_path() -> Option<PathBuf> {
 /// The working directory as a string, with `$HOME` shortened to `~`.
 fn pretty_dir(path: &Path) -> String {
     let full = path.display().to_string();
-    if let Ok(home) = std::env::var("HOME") {
-        if let Some(rest) = full.strip_prefix(&home) {
+    if let Ok(home) = std::env::var("HOME")
+        && let Some(rest) = full.strip_prefix(&home) {
             return format!("~{rest}");
         }
-    }
     full
 }

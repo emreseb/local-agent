@@ -118,14 +118,13 @@ impl Agent {
     /// Load a saved conversation from the session file, if one is set and
     /// exists. A missing file is not an error — it's just a fresh session.
     pub fn load_session(&mut self) -> Result<()> {
-        if let Some(path) = &self.session {
-            if path.exists() {
+        if let Some(path) = &self.session
+            && path.exists() {
                 let data = std::fs::read_to_string(path)
                     .with_context(|| format!("could not read session file '{}'", path.display()))?;
                 self.messages = serde_json::from_str(&data)
                     .with_context(|| format!("could not parse session file '{}'", path.display()))?;
             }
-        }
         Ok(())
     }
 
@@ -156,8 +155,11 @@ impl Agent {
 
         let mut output_tokens = 0u32;
         let mut eval_duration_ns = 0u64;
+        // Counts model calls this turn; not just a loop index, since the loop
+        // can return early and we report the count in the stats.
         let mut model_calls = 0usize;
 
+        #[allow(clippy::explicit_counter_loop)]
         for _ in 0..MAX_STEPS {
             let request = CompletionRequest {
                 model: self.model.clone(),

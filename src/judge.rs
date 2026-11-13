@@ -7,7 +7,9 @@
 //!   - writes -> allow inside the workspace, confirm outside it
 //!   - shell  -> allow a single read-only command, deny the destructive, confirm the rest
 //!   - browse -> allow read-only/navigation, confirm interactions
-//! Later it could be swapped for a model-based judge behind this same trait.
+//!
+//! `LocalModelJudge` is a second implementation: it asks a local LLM to classify
+//! each call, behind this same trait.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -196,7 +198,7 @@ fn classify_shell(command: &str) -> Verdict {
     // Compound commands (pipes, chaining, redirection, substitution) could hide
     // anything, so we never auto-allow them — we can't reason about the whole
     // thing by the first word alone.
-    if command.contains(|ch| matches!(ch, ';' | '|' | '&' | '>' | '<' | '`')) || command.contains("$(")
+    if command.contains([';', '|', '&', '>', '<', '`']) || command.contains("$(")
     {
         return Verdict::Confirm;
     }
