@@ -120,6 +120,10 @@ struct Cli {
     /// $XDG_CONFIG_HOME/local-agent/config.toml (or ~/.config/...).
     #[arg(long)]
     config: Option<PathBuf>,
+
+    /// List the available tools and exit.
+    #[arg(long)]
+    list_tools: bool,
 }
 
 #[tokio::main]
@@ -165,6 +169,14 @@ async fn main() -> Result<()> {
     registry.register(Box::new(Browse));
     registry.register(Box::new(HttpFetch::new()));
     registry.register(Box::new(Git));
+
+    // `--list-tools`: print the registered tools and exit.
+    if cli.list_tools {
+        for spec in registry.specs() {
+            println!("{:<18} {}", spec.name, spec.description);
+        }
+        return Ok(());
+    }
 
     // The Judge needs the workspace root to tell in-project actions from ones
     // that reach outside it. Grab a pretty version of it for the TUI footer
@@ -230,7 +242,7 @@ async fn main() -> Result<()> {
 async fn run_tui(agent: Agent, dir: String) -> Result<()> {
     let model = agent.model().to_string();
     let agent = Arc::new(Mutex::new(agent));
-    let mut tui = TuiUi::new(dir, model)?;
+    let mut tui = TuiUi::new(dir, model, history_path())?;
 
     loop {
         match tui.read_prompt()? {
@@ -264,7 +276,7 @@ async fn run_tui(agent: Agent, dir: String) -> Result<()> {
 /// conversation carries over between lines. Commands: `clear`, `exit`.
 async fn repl(mut agent: Agent) -> Result<()> {
     println!("local-agent REPL — type a prompt and press Enter.");
-    println!("commands: 'clear' (forget context), 'exit' (quit).\n");
+    println!("commands: 'clear' (forget context), 'tools' (list tools), 'exit' (quit).\n");
 
     let mut ui = CliUi::default();
     let stdin = io::stdin();
@@ -286,6 +298,12 @@ async fn repl(mut agent: Agent) -> Result<()> {
             "clear" | ":clear" => {
                 agent.clear();
                 println!("\x1b[2m(conversation cleared)\x1b[0m");
+                continue;
+            }
+            "tools" | ":tools" => {
+                for (name, desc) in agent.tools() {
+                    println!("\x1b[2m{name:<18} {desc}\x1b[0m");
+                }
                 continue;
             }
             _ => {}
@@ -326,6 +344,15 @@ fn default_config_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(base.join("local-agent").join("config.toml"))
+}
+
+/// Where the TUI stores its prompt history between runs:
+/// `$XDG_DATA_HOME/local-agent/history` (or `~/.local/share/...`).
+fn history_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))?;
+    Some(base.join("local-agent").join("history"))
 }
 
 /// The working directory as a string, with `$HOME` shortened to `~`.

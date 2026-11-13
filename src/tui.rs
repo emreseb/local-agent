@@ -20,6 +20,7 @@
 //! plain data and redrawn from scratch each frame.
 
 use std::io;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -141,6 +142,8 @@ pub struct TuiUi {
     cursor: usize,
     /// Previously submitted prompts, for ↑/↓ recall.
     history: Vec<String>,
+    /// Where the history is persisted between runs (if anywhere).
+    history_path: Option<PathBuf>,
     /// Where we are when browsing history (None = editing a fresh line).
     hist_idx: Option<usize>,
     status: String,
@@ -153,11 +156,18 @@ pub struct TuiUi {
 }
 
 impl TuiUi {
-    pub fn new(dir: String, model: String) -> Result<Self> {
+    pub fn new(dir: String, model: String, history_path: Option<PathBuf>) -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+
+        // Load prior prompt history, if a file is set and readable.
+        let history = history_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|text| text.lines().map(str::to_string).collect())
+            .unwrap_or_default();
 
         let mut ui = Self {
             terminal,
@@ -167,7 +177,8 @@ impl TuiUi {
             stream: String::new(),
             input: Vec::new(),
             cursor: 0,
-            history: Vec::new(),
+            history,
+            history_path,
             hist_idx: None,
             status: "type a prompt · Enter to send · '?' for keys · Esc quits".to_string(),
             follow: true,
@@ -633,7 +644,8 @@ impl TuiUi {
     }
 }
 
-/// Restore the terminal no matter how we leave (normal return, `?`, or panic).
+/// Restore the terminal no matter how we leave (normal return, `?`, or panic),
+/// and persist the prompt history. Both are best-effort.
 impl Drop for TuiUi {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
@@ -643,6 +655,15 @@ impl Drop for TuiUi {
             LeaveAlternateScreen
         );
         let _ = self.terminal.show_cursor();
+
+        if let Some(path) = &self.history_path {
+            // Keep the last 500 prompts so the file can't grow without bound.
+            let start = self.history.len().saturating_sub(500);
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, self.history[start..].join("\n"));
+        }
     }
 }
 
