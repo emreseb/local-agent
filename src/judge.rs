@@ -71,6 +71,34 @@ impl Judge for RuleJudge {
     }
 }
 
+/// `--yolo`: auto-approve anything the inner judge would merely *ask* about.
+/// Deny still means deny — yolo trusts the human's taste, not a blank cheque for
+/// the genuinely destructive. A decorator: it wraps another judge and bends only
+/// the `Confirm` verdict.
+pub struct AutoApprove(pub Box<dyn Judge>);
+
+impl Judge for AutoApprove {
+    fn verdict(&self, call: &ToolCall) -> Verdict {
+        match self.0.verdict(call) {
+            Verdict::Confirm => Verdict::Allow,
+            other => other,
+        }
+    }
+}
+
+/// `--careful`: the opposite decorator — turn every `Allow` into a `Confirm`, so
+/// nothing runs without a yes. `Deny` still denies.
+pub struct ConfirmAll(pub Box<dyn Judge>);
+
+impl Judge for ConfirmAll {
+    fn verdict(&self, call: &ToolCall) -> Verdict {
+        match self.0.verdict(call) {
+            Verdict::Allow => Verdict::Confirm,
+            other => other,
+        }
+    }
+}
+
 /// Pull a string argument out of a tool call, or "" if missing.
 fn arg_str<'a>(call: &'a ToolCall, key: &str) -> &'a str {
     call.arguments.get(key).and_then(|v| v.as_str()).unwrap_or("")

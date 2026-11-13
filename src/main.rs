@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 
 use crate::agent::Agent;
 use crate::anthropic::AnthropicProvider;
-use crate::judge::RuleJudge;
+use crate::judge::{AutoApprove, ConfirmAll, Judge, RuleJudge};
 use crate::ollama::OllamaProvider;
 use crate::provider::LlmProvider;
 use crate::tools::{
@@ -63,6 +63,15 @@ struct Cli {
     /// Launch the full-screen TUI instead of the plain CLI/REPL.
     #[arg(long)]
     tui: bool,
+
+    /// Auto-approve every action the Judge would merely ask about (destructive
+    /// commands are still denied). Convenient, less safe.
+    #[arg(long, conflicts_with = "careful")]
+    yolo: bool,
+
+    /// Confirm *every* action, even reads. Maximum paranoia.
+    #[arg(long)]
+    careful: bool,
 }
 
 #[tokio::main]
@@ -103,14 +112,15 @@ async fn main() -> Result<()> {
     let workspace = std::env::current_dir().context("could not determine the current directory")?;
     let dir = pretty_dir(&workspace);
 
-    let mut agent = Agent::new(
-        provider,
-        model,
-        cli.max_tokens,
-        cli.temperature,
-        registry,
-        Box::new(RuleJudge::new(workspace)),
-    );
+    // Start from the rule-based judge, then wrap it per the autonomy flags.
+    let mut judge: Box<dyn Judge> = Box::new(RuleJudge::new(workspace));
+    if cli.yolo {
+        judge = Box::new(AutoApprove(judge));
+    } else if cli.careful {
+        judge = Box::new(ConfirmAll(judge));
+    }
+
+    let mut agent = Agent::new(provider, model, cli.max_tokens, cli.temperature, registry, judge);
 
     if cli.tui {
         run_tui(agent, dir).await?;
