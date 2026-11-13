@@ -11,11 +11,12 @@ mod tui;
 mod ui;
 
 use std::io::{self, BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
+use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::agent::Agent;
@@ -31,19 +32,34 @@ use crate::tui::{Action, ChannelUi, ToUi, TuiUi};
 use crate::ui::CliUi;
 
 /// Which backend to talk to.
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum Provider {
     Anthropic,
     Ollama,
 }
 
 /// Which judge decides tool permissions.
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum JudgeKind {
     /// Hand-written rules — instant, free, deterministic (the default).
     Rule,
     /// Ask a local LLM to classify each call — slower, experimental.
     Model,
+}
+
+/// Defaults loaded from a config file (TOML). Every field is optional; a CLI
+/// flag always wins over the file, and the file wins over the built-in default.
+#[derive(Deserialize, Default)]
+struct FileConfig {
+    provider: Option<Provider>,
+    model: Option<String>,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    judge: Option<JudgeKind>,
+    judge_model: Option<String>,
+    system: Option<String>,
 }
 
 /// A local AI agent. Give it a prompt for one-shot mode, or no prompt to open
@@ -55,20 +71,20 @@ struct Cli {
     prompt: Option<String>,
 
     /// Which backend to use. Defaults to Ollama (local, free).
-    #[arg(long, value_enum, default_value_t = Provider::Ollama)]
-    provider: Provider,
+    #[arg(long, value_enum)]
+    provider: Option<Provider>,
 
     /// Which model to use. If omitted, a sensible default per provider is used.
     #[arg(long)]
     model: Option<String>,
 
     /// Maximum number of tokens in the reply (used by Anthropic).
-    #[arg(long, default_value_t = 1024)]
-    max_tokens: u32,
+    #[arg(long)]
+    max_tokens: Option<u32>,
 
     /// Sampling temperature: lower = more deterministic and literal (0.0–1.0).
-    #[arg(long, default_value_t = 0.2)]
-    temperature: f32,
+    #[arg(long)]
+    temperature: Option<f32>,
 
     /// Launch the full-screen TUI instead of the plain CLI/REPL.
     #[arg(long)]
@@ -84,8 +100,8 @@ struct Cli {
     careful: bool,
 
     /// Which judge decides tool permissions: 'rule' (default) or 'model'.
-    #[arg(long, value_enum, default_value_t = JudgeKind::Rule)]
-    judge: JudgeKind,
+    #[arg(long, value_enum)]
+    judge: Option<JudgeKind>,
 
     /// Model for the `--judge model` judge (defaults to the main Ollama model).
     #[arg(long)]
@@ -94,7 +110,16 @@ struct Cli {
     /// Save the conversation to this file after every turn, and resume from it
     /// on startup if it already exists.
     #[arg(long)]
-    session: Option<std::path::PathBuf>,
+    session: Option<PathBuf>,
+
+    /// Override the system prompt entirely (replaces the built-in grounding).
+    #[arg(long)]
+    system: Option<String>,
+
+    /// Path to a TOML config file. Defaults to
+    /// $XDG_CONFIG_HOME/local-agent/config.toml (or ~/.config/...).
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -102,12 +127,22 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
 
-    let model = cli.model.unwrap_or_else(|| match cli.provider {
+    // Load the config file, then resolve each setting: CLI flag wins over the
+    // file, the file wins over the built-in default.
+    let config = load_config(cli.config.as_deref())?;
+    let provider_kind = cli.provider.or(config.provider).unwrap_or(Provider::Ollama);
+    let max_tokens = cli.max_tokens.or(config.max_tokens).unwrap_or(1024);
+    let temperature = cli.temperature.or(config.temperature).unwrap_or(0.2);
+    let judge_kind = cli.judge.or(config.judge).unwrap_or(JudgeKind::Rule);
+    let judge_model = cli.judge_model.clone().or(config.judge_model.clone());
+    let system_override = cli.system.clone().or(config.system.clone());
+
+    let model = cli.model.clone().or(config.model.clone()).unwrap_or_else(|| match provider_kind {
         Provider::Anthropic => "claude-haiku-5-5".to_string(),
         Provider::Ollama => "qwen2.5:7b".to_string(),
     });
 
-    let provider: Box<dyn LlmProvider> = match cli.provider {
+    let provider: Box<dyn LlmProvider> = match provider_kind {
         Provider::Anthropic => {
             let api_key = std::env::var("ANTHROPIC_API_KEY")
                 .context("ANTHROPIC_API_KEY is not set — put it in a .env file or export it")?;
@@ -138,15 +173,15 @@ async fn main() -> Result<()> {
     let dir = pretty_dir(&workspace);
 
     // Pick the base judge, then wrap it per the autonomy flags.
-    let mut judge: Box<dyn Judge> = match cli.judge {
+    let mut judge: Box<dyn Judge> = match judge_kind {
         JudgeKind::Rule => Box::new(RuleJudge::new(workspace)),
         JudgeKind::Model => {
             let base_url = std::env::var("OLLAMA_HOST")
                 .unwrap_or_else(|_| "http://localhost:11434".to_string());
-            let judge_model = cli.judge_model.clone().unwrap_or_else(|| model.clone());
+            let jmodel = judge_model.unwrap_or_else(|| model.clone());
             Box::new(LocalModelJudge::new(
                 Box::new(OllamaProvider::new(base_url)),
-                judge_model,
+                jmodel,
             ))
         }
     };
@@ -156,7 +191,12 @@ async fn main() -> Result<()> {
         judge = Box::new(ConfirmAll(judge));
     }
 
-    let mut agent = Agent::new(provider, model, cli.max_tokens, cli.temperature, registry, judge);
+    let mut agent = Agent::new(provider, model, max_tokens, temperature, registry, judge);
+
+    // A custom system prompt, if one was given.
+    if let Some(system) = system_override {
+        agent.set_system(system);
+    }
 
     // Wire up the session file (if any) and resume a prior conversation.
     agent.set_session(cli.session.clone());
@@ -259,6 +299,33 @@ async fn repl(mut agent: Agent) -> Result<()> {
 
     println!("bye!");
     Ok(())
+}
+
+/// Load the config file: the explicit `--config` path if given, else the
+/// default location. A missing file yields empty defaults (not an error).
+fn load_config(explicit: Option<&Path>) -> Result<FileConfig> {
+    let path = match explicit {
+        Some(p) => Some(p.to_path_buf()),
+        None => default_config_path(),
+    };
+    if let Some(path) = path {
+        if path.exists() {
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("could not read config '{}'", path.display()))?;
+            return toml::from_str(&text)
+                .with_context(|| format!("could not parse config '{}'", path.display()));
+        }
+    }
+    Ok(FileConfig::default())
+}
+
+/// `$XDG_CONFIG_HOME/local-agent/config.toml`, falling back to
+/// `~/.config/local-agent/config.toml`.
+fn default_config_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("local-agent").join("config.toml"))
 }
 
 /// The working directory as a string, with `$HOME` shortened to `~`.

@@ -95,6 +95,11 @@ impl Agent {
         &self.model
     }
 
+    /// Replace the built-in system prompt (the `--system` flag / config key).
+    pub fn set_system(&mut self, system: String) {
+        self.system = system;
+    }
+
     /// Point the agent at a session file. With one set, every turn is saved
     /// there; `load_session` reads it back.
     pub fn set_session(&mut self, path: Option<PathBuf>) {
