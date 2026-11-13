@@ -11,6 +11,10 @@ use serde_json::{json, Value};
 
 use crate::provider::ToolSpec;
 
+/// Cap on how much fetched/produced text we hand back to the model, so a giant
+/// page can't blow up the context window.
+const MAX_FETCH_CHARS: usize = 10_000;
+
 // `Send + Sync` so the registry (and the whole agent) can move to a background
 // task — see the note on `LlmProvider`.
 #[async_trait]
@@ -237,6 +241,81 @@ impl Tool for RunShellCommand {
         }
 
         Ok(result)
+    }
+}
+
+/// Fetch a URL over HTTP(S) and return the response body as text. GET only, so
+/// it can't change anything on the far end — a read for the web. Owns a shared
+/// `reqwest::Client` so repeated fetches reuse connections.
+pub struct HttpFetch {
+    client: reqwest::Client,
+}
+
+impl HttpFetch {
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+impl Default for HttpFetch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for HttpFetch {
+    fn name(&self) -> &str {
+        "http_fetch"
+    }
+
+    fn description(&self) -> &str {
+        "Fetch a URL over HTTP(S) with a GET request and return the response body as text."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The URL to fetch, including the scheme (e.g. https://example.com)."
+                }
+            },
+            "required": ["url"]
+        })
+    }
+
+    async fn run(&self, arguments: &Value) -> Result<String> {
+        let url = arguments
+            .get("url")
+            .and_then(|v| v.as_str())
+            .context("http_fetch requires a string argument 'url'")?;
+
+        let resp = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("failed to fetch '{url}'"))?;
+
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .with_context(|| format!("could not read the body of '{url}'"))?;
+
+        // Truncate on a char boundary so we never split a UTF-8 sequence.
+        let truncated: String = body.chars().take(MAX_FETCH_CHARS).collect();
+        let note = if truncated.len() < body.len() {
+            format!("\n…(truncated to {MAX_FETCH_CHARS} chars)")
+        } else {
+            String::new()
+        };
+
+        Ok(format!("HTTP {status}\n\n{truncated}{note}"))
     }
 }
 

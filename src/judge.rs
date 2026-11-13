@@ -53,6 +53,11 @@ impl Judge for RuleJudge {
             // Reads can't damage anything.
             "read_file" | "list_directory" => Verdict::Allow,
 
+            // A GET fetch changes nothing on the far end, so we treat it as a
+            // read. (It is still network egress — tighten to Confirm here, or
+            // run with --careful, if that matters for your threat model.)
+            "http_fetch" => Verdict::Allow,
+
             // Writes: safe inside the project (git can undo), ask outside it.
             "write_file" | "edit_file" => {
                 match call.arguments.get("path").and_then(|v| v.as_str()) {

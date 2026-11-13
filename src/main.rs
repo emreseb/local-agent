@@ -24,7 +24,7 @@ use crate::judge::{AutoApprove, ConfirmAll, Judge, RuleJudge};
 use crate::ollama::OllamaProvider;
 use crate::provider::LlmProvider;
 use crate::tools::{
-    Browse, EditFile, ListDirectory, ReadFile, RunShellCommand, ToolRegistry, WriteFile,
+    Browse, EditFile, HttpFetch, ListDirectory, ReadFile, RunShellCommand, ToolRegistry, WriteFile,
 };
 use crate::tui::{Action, ChannelUi, ToUi, TuiUi};
 use crate::ui::CliUi;
@@ -105,6 +105,7 @@ async fn main() -> Result<()> {
     registry.register(Box::new(ListDirectory));
     registry.register(Box::new(EditFile));
     registry.register(Box::new(Browse));
+    registry.register(Box::new(HttpFetch::new()));
 
     // The Judge needs the workspace root to tell in-project actions from ones
     // that reach outside it. Grab a pretty version of it for the TUI footer
